@@ -70,7 +70,12 @@ Global ahi := new AutoHotInterception()
 Global pad := new ViGEmXb360()
 Global sw := SimpleWooting_v1
 sw.Init()
-Global MouseId := ahi.GetMouseId(0x04D9, 0xFC41)
+Global MouseIds := []
+for _, dev in ahi.GetDeviceList() {
+    if (dev.IsMouse) {
+        MouseIds.Push(dev.ID)
+    }
+}
 
 ; === Dynamic Config Load ===
 #Include *i %A_ScriptDir%\$WootingConfigs\$TEMP_STORED
@@ -259,12 +264,16 @@ return
 ; ==========================================
 UpdateRButtonSuppression(gameActive) {
     global
-    shouldBlock := (EnableMouseSteering && gameActive && MouseId) 
+    shouldBlock := (EnableMouseSteering && gameActive && MouseIds.MaxIndex() > 0) 
     if (shouldBlock && !RButtonSuppressed) {
-        ahi.SubscribeMouseButton(MouseId, 1, true, Func("AHI_RButton"))
+        for _, id in MouseIds {
+            ahi.SubscribeMouseButton(id, 1, true, Func("AHI_RButton"))
+        }
         RButtonSuppressed := true
     } else if (!shouldBlock && RButtonSuppressed) {
-        ahi.UnsubscribeMouseButton(MouseId, 1)
+        for _, id in MouseIds {
+            ahi.UnsubscribeMouseButton(id, 1)
+        }
         RButtonSuppressed := false
         RButtonDown := false
     }
@@ -275,9 +284,10 @@ AHI_RButton(state) {
 }
 
 SendRButton(state) {
-    global MouseId, ahi
-    if (MouseId)
-        ahi.SendMouseButtonEvent(MouseId, 1, state ? 1 : 0)
+    global MouseIds, ahi
+    for _, id in MouseIds {
+        ahi.SendMouseButtonEvent(id, 1, state ? 1 : 0)
+    }
 }
 
 SetSticks() {
