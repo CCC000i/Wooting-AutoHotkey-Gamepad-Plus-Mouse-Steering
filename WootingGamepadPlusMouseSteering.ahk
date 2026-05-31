@@ -144,18 +144,29 @@ Gui, 2:Hide
 UpdateRButtonSuppression(WinActive("ahk_exe " . exeName))
 SetTimer, CoreLoop, 10
 
-FileDelete, temp_hotkeys.ahk
-Loop, 10 {
-    If !FileExist("temp_hotkeys.ahk")
-        break
-    Sleep, 50 ; Wait for the file system to catch up
-}
-If FileExist("temp_hotkeys.ahk") {
-    MsgBox, 16, Error, Failed to delete temp_hotkeys.ahk. It may be locked by another process.
+FileRead, currentHotkeys, temp_hotkeys.ahk
+StringReplace, currentHotkeys, currentHotkeys, `r`n, `n, All
+checkBinds := ProfileSpecificBinds
+StringReplace, checkBinds, checkBinds, `r`n, `n, All
+
+if (currentHotkeys != checkBinds) {
+    FileDelete, temp_hotkeys.ahk
+    Loop, 10 {
+        If !FileExist("temp_hotkeys.ahk")
+            break
+        Sleep, 50 ; Wait for the file system to catch up
+    }
+    If FileExist("temp_hotkeys.ahk") {
+        MsgBox, 16, Error, Failed to delete temp_hotkeys.ahk. It may be locked by another process.
+        ExitApp
+    }
+    if (ProfileSpecificBinds != "")
+        FileAppend, %ProfileSpecificBinds%, temp_hotkeys.ahk
+    
+    ; The binds changed, so we must reload immediately to parse them
+    Reload
     ExitApp
 }
-if (ProfileSpecificBinds != "")
-    FileAppend, %ProfileSpecificBinds%, temp_hotkeys.ahk
 
 return
 
@@ -389,7 +400,9 @@ CleanupMouseLockAndHide() {
 }
 
 CleanUp() {
-    FileDelete, temp_hotkeys.ahk
+    ; Do not delete the temp file if the script is just reloading or restarting
+    if (A_ExitReason != "Reload" && A_ExitReason != "Single")
+        FileDelete, temp_hotkeys.ahk
 }
 
 ; === Permanent Keybinds ===
