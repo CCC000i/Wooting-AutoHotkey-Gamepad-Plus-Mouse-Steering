@@ -44,7 +44,7 @@ if (!FileExist(activeConfigPath)) {
     Loop {
         InputBox, userInput, Load Config, Enter config alias or file name (without .ini):,, 300, 130
         if ErrorLevel ; Esc pressed during input box
-			ExitApp
+            ExitApp
         userInput := Trim(userInput)
         matchedConfig := ""
         
@@ -110,6 +110,7 @@ EnableMouseSteering     := (EnableMouseSteering != "") ? EnableMouseSteering : f
 MouseSteerWidth         := (MouseSteerWidth != "") ? MouseSteerWidth : 1.0
 LX_D_MovesMouse         := (LX_D_MovesMouse != "") ? LX_D_MovesMouse : false
 WootingSupersedesMouse  := (WootingSupersedesMouse != "") ? WootingSupersedesMouse : false
+WootingDeadzone         := (WootingDeadzone != "") ? WootingDeadzone : 8
 LX_Antideadzone         := (LX_Antideadzone != "") ? LX_Antideadzone : 0
 LY_Antideadzone         := (LY_Antideadzone != "") ? LY_Antideadzone : 0
 RX_Antideadzone         := (RX_Antideadzone != "") ? RX_Antideadzone : 0
@@ -173,14 +174,13 @@ if (currentHotkeys != checkBinds) {
     ExitApp
 }
 
-return
+#Include *i temp_hotkeys.ahk ; !!! Included strictly at auto-execute threshold
 
 ; ==========================================
-;               AUTO-EXECUTE END
+; AUTO-EXECUTE ENDS HERE
 ; ==========================================
+return ; fallback if Include does not contain aut-execute breaking assignments
 
-; Included strictly after auto-execute to prevent hotkey return behavior
-#Include *i temp_hotkeys.ahk
 
 CoreLoop:
     isGameActive := WinActive("ahk_exe " . exeName)
@@ -314,8 +314,16 @@ SetSticks() {
         }
         
         if (!hasDigital) {
-            for key, value in aArray
-                pressure += sw.RP(key) * value
+            for key, value in aArray {
+                rawVal := sw.RP(key)
+                if (WootingDeadzone > 0) {
+                    if (WootingDeadzone >= 255)
+                        rawVal := 0
+                    else
+                        rawVal := (rawVal <= WootingDeadzone) ? 0 : (rawVal - WootingDeadzone) * (255.0 / (255 - WootingDeadzone))
+                }
+                pressure += rawVal * value
+            }
                 
             if (axis == "LX" && MouseSteeringActive) {
                 if (!WootingSupersedesMouse || pressure == 0) {
@@ -360,8 +368,16 @@ SetTriggers() {
         }
         
         if (!hasDigital) {
-            for key, value in aArray
-                pressure += sw.RP(key) * value
+            for key, value in aArray {
+                rawVal := sw.RP(key)
+                if (WootingDeadzone > 0) {
+                    if (WootingDeadzone >= 255)
+                        rawVal := 0
+                    else
+                        rawVal := (rawVal <= WootingDeadzone) ? 0 : (rawVal - WootingDeadzone) * (255.0 / (255 - WootingDeadzone))
+                }
+                pressure += rawVal * value
+            }
         }
         
         if (adz > 0 && pressure > 0) {
@@ -420,4 +436,5 @@ CleanUp() {
 !y::
     FileDelete, %A_ScriptDir%\$WootingConfigs\$TEMP_STORED
     Reload
+!u::ExitApp
 return
