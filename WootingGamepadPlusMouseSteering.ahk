@@ -1,6 +1,8 @@
 ; Requires ViGEmBus and Wooting SDK/Wootility to be installed, + bundled scripts and DLLs in .\Lib
-; Use Ctrl+Shift at startup or Alt+Y while running to load new config, use Alt+T for regular reload
+; Use Ctrl+Shift at startup or Alt+Y while running to load new config, use Alt+T for regular reload, and Alt+U to close script
+; profile aliases and auto-fill on exe detection
 Global configAliases := {1: "GridLegends", "gl": "GridLegends"}
+Global exeMatches := {["test.exe","GridLegends.exe"]:"GridLegends"} 
 
 #Requires AutoHotkey v1.1
 #NoEnv
@@ -41,8 +43,21 @@ if ((DllCall("GetAsyncKeyState", "Int", 0x11) & 0x8000) && (DllCall("GetAsyncKey
 }
 
 if (!FileExist(activeConfigPath)) {
+    ; Determine default profile based on running processes
+    defaultProfile := ""
+    For exeList, profileName in exeMatches {
+        For _, exeName in exeList {
+            Process, Exist, %exeName%
+            if (ErrorLevel) { ; ErrorLevel is set to the Process ID if the process exists
+                defaultProfile := profileName
+                break 2 ; Break out of both loops once a match is found
+            }
+        }
+    }
+
     Loop {
-        InputBox, userInput, Load Config, Enter config alias or file name (without .ini):,, 300, 130
+        ; Added %defaultProfile% as the 11th parameter (Default value)
+        InputBox, userInput, Load Config, Enter config alias or file name (without .ini):,, 300, 130,,,,, %defaultProfile%
         if ErrorLevel ; Esc pressed during input box
             ExitApp
         userInput := Trim(userInput)
@@ -122,8 +137,15 @@ EnableMouseLock         := (EnableMouseLock != "") ? EnableMouseLock : false
 EnableVerticalLine      := (EnableVerticalLine != "") ? EnableVerticalLine : false
 ProfileSpecificBinds    := (ProfileSpecificBinds != "") ? ProfileSpecificBinds : ""
 
-if (exeName == "") {
-    MsgBox, 16, Error, Provide exeName := "", ExitApp
+; Normalize exeName into an array and create a Window Group
+if (!IsObject(exeName)) {
+    if (exeName == "") {
+        MsgBox, 16, Error, Provide exeName (as a string or array), ExitApp
+    }
+    exeName := [exeName]
+}
+For _, exe in exeName {
+    GroupAdd, ActiveGameGroup, ahk_exe %exe%
 }
 
 ; Post-config calculations
@@ -147,7 +169,7 @@ Global LineHwnd := WinExist()
 Gui, 2:Hide
 
 ; === Start Core Loop ===
-UpdateRButtonSuppression(WinActive("ahk_exe " . exeName))
+UpdateRButtonSuppression(WinActive("ahk_group ActiveGameGroup"))
 SetTimer, CoreLoop, 10
 
 FileRead, currentHotkeys, temp_hotkeys.ahk
@@ -175,22 +197,20 @@ if (currentHotkeys != checkBinds) {
 }
 
 #Include *i temp_hotkeys.ahk ; !!! Included strictly at auto-execute threshold
-
+return ; fallback if Include does not contain auto-execute breaking assignments
 ; ==========================================
 ; AUTO-EXECUTE ENDS HERE
 ; ==========================================
-return ; fallback if Include does not contain aut-execute breaking assignments
-
 
 CoreLoop:
-    isGameActive := WinActive("ahk_exe " . exeName)
+    isGameActive := WinActive("ahk_group ActiveGameGroup")
     UpdateRButtonSuppression(isGameActive)
     
     if (isGameActive) { 
         MouseGetPos, xpos, ypos
         
         if (EnableMouseLock || EnableVerticalLine) {
-            WinGetPos, nWx, nWy, nWw, nWh, ahk_exe %exeName% 
+            WinGetPos, nWx, nWy, nWw, nWh, ahk_group ActiveGameGroup 
             if (nWx != Wx || nWy != Wy || nWw != Ww || nWh != Wh) {
                 Wx := nWx, Wy := nWy, Ww := nWw, Wh := nWh
                 NumPut(Wx, Rect, 0, "Int"), NumPut(Wy, Rect, 4, "Int")
