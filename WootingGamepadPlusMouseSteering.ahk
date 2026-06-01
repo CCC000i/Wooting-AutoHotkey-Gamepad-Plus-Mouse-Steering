@@ -17,13 +17,15 @@ settingsFile := A_ScriptDir . "\$WootingConfigs\.Settings.ini"
 IfNotExist, %A_ScriptDir%\$WootingConfigs
     FileCreateDir, %A_ScriptDir%\$WootingConfigs
 
-; Read and dynamically parse the new configuration file
+; Read and dynamically parse the configuration file
 IniRead, aliasStr, %settingsFile%, GlobalSettings, configAliases, % ""
 IniRead, exeStr, %settingsFile%, GlobalSettings, exeMatches, % ""
-IniRead, WootingEnabled, %settingsFile%, GlobalSettings, WootingEnabled, % ""
+IniRead, WootingEnabled, %settingsFile%, GlobalSettings, WootingEnabled, 1
+IniRead, ExternalXInputEnabled, %settingsFile%, GlobalSettings, ExternalXInputEnabled, 1
 Global configAliases := ParseConfigAliases(aliasStr)
 Global exeMatches := ParseExeMatches(exeStr)
 Global WootingEnabled := WootingEnabled
+Global ExternalXInputEnabled := ExternalXInputEnabled
 
 ; === Global State & Constants ===
 Global SysCursorsList := [32512, 32513, 32514, 32515, 32516, 32642, 32643, 32644, 32645, 32646, 32648, 32649, 32650]
@@ -42,7 +44,7 @@ Global MouseIsLocked := false, Wx := 0, Wy := 0, Ww := 0, Wh := 0
 Global CrossHairVisible := False, ForceCursorHide := False, CursorEnforceCounter := 0
 Global VertLineVisible := False
 Global bindsPID := 0 ; Tracks the detached macro script
-Global WD_Mult := 1.0 ; Pre-calculated Wooting Deadzone Multiplier
+Global WD_Mult := 1.0, ExtS_Mult := 1.0, ExtT_Mult := 1.0
 Global RunAlways := false ; Tracks if window focus detection should be bypassed
 
 ; === Session & Profile Selection ===
@@ -88,6 +90,35 @@ if (matchedConfig == "") {
     }
 }
 
+; === Pre-ViGEm External Controller Detection ===
+Global ExternalGamepads := []
+Global ExtPadState := {LX: 0, LY: 0, RX: 0, RY: 0, LT: 0, RT: 0}
+
+if (ExternalXInputEnabled) {
+    Global hXInput := DllCall("LoadLibrary", "Str", "xinput1_4.dll", "Ptr")
+    if (!hXInput)
+        hXInput := DllCall("LoadLibrary", "Str", "xinput1_3.dll", "Ptr")
+    Global XInputGetStateStr := hXInput ? (DllCall("GetModuleHandle", "Str", "xinput1_4.dll", "Ptr") ? "xinput1_4\XInputGetState" : "xinput1_3\XInputGetState") : ""
+
+    ; Cache physical XInput devices (0 to 3) before script creates its own virtual one
+    if (XInputGetStateStr) {
+        Loop, 4 {
+            idx := A_Index - 1
+            VarSetCapacity(XINPUT_STATE, 16, 0)
+            if (DllCall(XInputGetStateStr, "UInt", idx, "Ptr", &XINPUT_STATE) == 0)
+                ExternalGamepads.Push({Type: "XInput", ID: idx})
+        }
+    }
+
+    ; Cache physical DInput devices via AHK native (1 to 16)
+    Loop, 16 {
+        GetKeyState, joyName, %A_Index%JoyName
+        ; Exclude devices with "XBOX" in their generic strings to prevent duplicates of XInput gamepads
+        if (joyName != "" && !InStr(joyName, "XBOX"))
+            ExternalGamepads.Push({Type: "DInput", ID: A_Index})
+    }
+}
+
 ; === Libraries & Device Initialization ===
 #Include <AutoHotInterception_v1>
 #Include <AHK-ViGEm-Bus_v1>
@@ -96,8 +127,8 @@ if (matchedConfig == "") {
 Global ahi := new AutoHotInterception()
 Global pad := new ViGEmXb360()
 Global sw := SimpleWooting_v1
-if WootingEnabled = true
-	sw.Init()
+if (WootingEnabled)
+    sw.Init()
 Global MouseIds := []
 for _, dev in ahi.GetDeviceList() {
     if (dev.IsMouse)
@@ -115,6 +146,8 @@ IniRead, MouseSteerWidth, %configFile%, Settings, MouseSteerWidth, 1.0
 IniRead, LX_D_MovesMouse, %configFile%, Settings, LX_D_MovesMouse, 0
 IniRead, WootingSupersedesMouse, %configFile%, Settings, WootingSupersedesMouse, 0
 IniRead, WootingDeadzone, %configFile%, Settings, WootingDeadzone, 8
+IniRead, ExtStickDeadzone, %configFile%, Settings, ExtStickDeadzone, 8
+IniRead, ExtTriggerDeadzone, %configFile%, Settings, ExtTriggerDeadzone, 8
 IniRead, LX_Antideadzone, %configFile%, Settings, LX_Antideadzone, 0
 IniRead, LY_Antideadzone, %configFile%, Settings, LY_Antideadzone, 0
 IniRead, RX_Antideadzone, %configFile%, Settings, RX_Antideadzone, 0
@@ -127,6 +160,8 @@ IniRead, EnableVerticalLine, %configFile%, Settings, EnableVerticalLine, 0
 
 ; Pre-calculate Deadzone math
 Global WD_Mult := (WootingDeadzone >= 255 || WootingDeadzone <= 0) ? 0 : (255.0 / (255 - WootingDeadzone))
+Global ExtS_Mult := (ExtStickDeadzone >= 255 || ExtStickDeadzone <= 0) ? 0 : (255.0 / (255 - ExtStickDeadzone))
+Global ExtT_Mult := (ExtTriggerDeadzone >= 255 || ExtTriggerDeadzone <= 0) ? 0 : (255.0 / (255 - ExtTriggerDeadzone))
 MaxDist := (A_ScreenHeight / 2) * MouseSteerWidth
 
 ; Read Arrays
@@ -236,6 +271,8 @@ CoreLoop:
     UpdateRButtonSuppression(isGameActive)
     
     if (isGameActive) { 
+        ReadExternalGamepads() ; Fetches the physical controllers' state into ExtPadState
+        
         MouseGetPos, xpos, ypos
         
         if (EnableMouseLock || EnableVerticalLine) {
@@ -313,7 +350,7 @@ CoreLoop:
         UpdateVirtualAxis("RT", false, RT_D, RT_A, RT_Antideadzone)
         
     } else if (FocusPass) {
-        FocusLost()
+    FocusLost()
         FocusPass := false
     }
 return
@@ -321,6 +358,54 @@ return
 ; ==========================================
 ;                 FUNCTIONS
 ; ==========================================
+
+ReadExternalGamepads() {
+    global ExternalGamepads, ExtPadState, XInputGetStateStr
+
+    ExtPadState.LX := 0, ExtPadState.LY := 0, ExtPadState.RX := 0, ExtPadState.RY := 0, ExtPadState.LT := 0, ExtPadState.RT := 0
+
+    for _, padObj in ExternalGamepads {
+        if (padObj.Type == "XInput" && XInputGetStateStr) {
+            VarSetCapacity(XINPUT_STATE, 16, 0)
+            if (DllCall(XInputGetStateStr, "UInt", padObj.ID, "Ptr", &XINPUT_STATE) == 0) {
+                ExtPadState.LT := NumGet(XINPUT_STATE, 6, "UChar")
+                ExtPadState.RT := NumGet(XINPUT_STATE, 7, "UChar")
+                ; Scale 16-bit integers to 8-bit floats roughly -255 to 255
+                ExtPadState.LX := Round(NumGet(XINPUT_STATE, 8, "Short") / 128.50196)
+                ExtPadState.LY := Round(NumGet(XINPUT_STATE, 10, "Short") / 128.50196)
+                ExtPadState.RX := Round(NumGet(XINPUT_STATE, 12, "Short") / 128.50196)
+                ExtPadState.RY := Round(NumGet(XINPUT_STATE, 14, "Short") / 128.50196)
+                break 
+            }
+        } else if (padObj.Type == "DInput") {
+            id := padObj.ID
+            GetKeyState, jX, %id%JoyX
+            if (jX != "") {
+                GetKeyState, jY, %id%JoyY
+                GetKeyState, jZ, %id%JoyZ ; Shared Triggers (LT+, RT-)
+                GetKeyState, jR, %id%JoyR ; Right Stick Y
+                GetKeyState, jU, %id%JoyU ; Right Stick X
+
+                ; 1. Apply a 0.8% deadzone around center (50.0) to eliminate hardware noise
+                nX := (Abs(jX - 50) < 0.8) ? 50 : jX
+                nY := (Abs(jY - 50) < 0.8) ? 50 : jY
+                nU := (Abs(jU - 50) < 0.8) ? 50 : jU
+                nR := (Abs(jR - 50) < 0.8) ? 50 : jR
+
+                ; 2. Map Sticks to -255 to 255 (Y axes inverted)
+                ExtPadState.LX := Max(-255, Min(255, Round((nX - 50) * 5.1)))
+                ExtPadState.LY := Max(-255, Min(255, Round((nY - 50) * -5.1)))
+                ExtPadState.RX := Max(-255, Min(255, Round((nU - 50) * 5.1)))
+                ExtPadState.RY := Max(-255, Min(255, Round((nR - 50) * -5.1)))
+
+                ; 3. Separate Shared Trigger Axis (JoyZ) into LT and RT (0 to 255)
+                ExtPadState.LT := (jZ > 50.5) ? Max(0, Min(255, Round((jZ - 50) * 5.1))) : 0
+                ExtPadState.RT := (jZ < 49.5) ? Max(0, Min(255, Round((50 - jZ) * 5.1))) : 0
+                break
+            }
+        }
+    }
+}
 
 ParseConfigAliases(iniStr) {
     obj := {}
@@ -363,6 +448,7 @@ ReadIni(file, key, section := "AnalogBinds") {
 UpdateVirtualAxis(axis, isStick, ByRef dArray, ByRef aArray, adz) {
     global lastAxisState, ScreenCenter, MaxDist, ypos, xpos
     global LX_D_MovesMouse, WootingDeadzone, WD_Mult, MouseSteeringActive, WootingSupersedesMouse
+    global ExtPadState, ExtStickDeadzone, ExtTriggerDeadzone, ExtS_Mult, ExtT_Mult, WootingEnabled
     
     pressure := 0, hasDigital := false
     
@@ -381,15 +467,34 @@ UpdateVirtualAxis(axis, isStick, ByRef dArray, ByRef aArray, adz) {
     
     ; 2. Process Analog Inputs if no digital override
     if (!hasDigital) {
+        
+        ; --- Wooting Input ---
         for key, value in aArray {
-			if WootingEnabled = true
-				rawVal := sw.RP(key)
+            if (WootingEnabled)
+                rawVal := sw.RP(key)
             if (WootingDeadzone > 0)
                 rawVal := (rawVal <= WootingDeadzone) ? 0 : (rawVal - WootingDeadzone) * WD_Mult
             pressure += rawVal * value
         }
         
-        ; Specific logic for Steering (LX)
+        ; --- External Gamepad Input ---
+        extVal := 0
+        if (isStick) {
+            rawExt := ExtPadState[axis]
+            absExt := Abs(rawExt)
+            if (ExtStickDeadzone > 0)
+                absExt := (absExt <= ExtStickDeadzone) ? 0 : (absExt - ExtStickDeadzone) * ExtS_Mult
+            extVal := rawExt < 0 ? -absExt : absExt
+        } else {
+            rawExt := ExtPadState[axis]
+            if (ExtTriggerDeadzone > 0)
+                extVal := (rawExt <= ExtTriggerDeadzone) ? 0 : (rawExt - ExtTriggerDeadzone) * ExtT_Mult
+            else
+                extVal := rawExt
+        }
+        pressure += extVal
+        
+        ; --- Specific logic for Steering (LX) ---
         if (isStick && axis == "LX" && MouseSteeringActive) {
             if (!WootingSupersedesMouse || pressure == 0) {
                 mousePressure := ((xpos - ScreenCenter.x) / MaxDist) * 255
