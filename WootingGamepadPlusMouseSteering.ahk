@@ -1,6 +1,4 @@
 ; Requires ViGEmBus and Wooting SDK/Wootility to be installed, + bundled scripts and DLLs in .\Lib
-Global configAliases := {1: "GridLegends", "gl": "GridLegends"}
-Global exeMatches := {["test.exe","GridLegends.exe"]:"GridLegends"} 
 
 #Requires AutoHotkey v1.1
 #NoEnv
@@ -14,9 +12,17 @@ OnExit("CleanUp")
 OnMessage(0x4A, "Receive_WM_COPYDATA") ; Listen for IPC messages
 DllCall("winmm\timeBeginPeriod", "UInt", 1) ; Request 1ms system timer resolution
 
-; --- Directory Setup ---
+; --- Directory Setup & Global Settings Load ---
+settingsFile := A_ScriptDir . "\$WootingConfigs\.Settings.ini"
 IfNotExist, %A_ScriptDir%\$WootingConfigs
     FileCreateDir, %A_ScriptDir%\$WootingConfigs
+
+; Read and dynamically parse the new configuration file
+IniRead, aliasStr, %settingsFile%, GlobalSettings, configAliases, % ""
+IniRead, exeStr, %settingsFile%, GlobalSettings, exeMatches, % ""
+
+Global configAliases := ParseConfigAliases(aliasStr)
+Global exeMatches := ParseExeMatches(exeStr)
 
 ; === Global State & Constants ===
 Global SysCursorsList := [32512, 32513, 32514, 32515, 32516, 32642, 32643, 32644, 32645, 32646, 32648, 32649, 32650]
@@ -36,6 +42,7 @@ Global CrossHairVisible := False, ForceCursorHide := False, CursorEnforceCounter
 Global VertLineVisible := False
 Global bindsPID := 0 ; Tracks the detached macro script
 Global WD_Mult := 1.0 ; Pre-calculated Wooting Deadzone Multiplier
+Global RunAlways := false ; Tracks if window focus detection should be bypassed
 
 ; === Session & Profile Selection ===
 sessionFile := A_ScriptDir . "\$WootingConfigs\.last_profile"
@@ -131,16 +138,20 @@ Global RT_A := ParseAnalog(ReadIni(configFile, "RT_A")), RT_D := ParseDigital(Re
 Fileread, FileContent, %configFile%
 if (ErrorLevel)
     MsgBox Ini could not be read., ExitApp
-RegExMatch(FileContent, "s)\[GameBinds\]\R*(.*)", Match)
+RegExMatch(FileContent, "s)\[CustomCode\]\R*(.*)", Match)
 Global CustomCode := Match1
 
-if (exeName.Length() == 0)
-    MsgBox, 16, Error, Provide valid exeName in config., ExitApp
+if (exeName.Length() == 0) {
+    RunAlways := true
+    EnableMouseLock := 0 ; Naturally ignored scenario
+}
 
 exeString := ""
-For _, exe in exeName {
-    GroupAdd, ActiveGameGroup, ahk_exe %exe%
-    exeString .= (exeString = "" ? "" : "|") . exe
+if (!RunAlways) {
+    For _, exe in exeName {
+        GroupAdd, ActiveGameGroup, ahk_exe %exe%
+        exeString .= (exeString = "" ? "" : "|") . exe
+    }
 }
 
 ; === Create Secondary Script ===
@@ -157,9 +168,11 @@ if (parentPID) {
     SetTimer, WatchdogCheck, 1000
 }
 exeList := A_Args[2]
-Loop, Parse, exeList, |
-{
-    GroupAdd, ActiveGameGroup, ahk_exe %A_LoopField%
+if (exeList != """") {
+    Loop, Parse, exeList, |
+    {
+        GroupAdd, ActiveGameGroup, ahk_exe %A_LoopField%
+    }
 }
 
 SendPadBtn(btnName, state) {
@@ -188,7 +201,7 @@ WatchdogCheck:
 return
 )"
 
-CCPath := A_ScriptDir "\$WootingConfigs\$TEMPCUSTOMCODE.ahk"
+global CCPath := A_ScriptDir "\$WootingConfigs\$TEMPRUNNINGSCRIPT.ahk"
 FileDelete, %CCPath%
 FileAppend, %CustomCode%, %CCPath%
 
@@ -208,7 +221,7 @@ Gui, 2:Add, Progress, x1 y0 w1 h10000 BackgroundBlue
 WinSet, Transparent, 127          
 Global LineHwnd := WinExist()
 
-UpdateRButtonSuppression(WinActive("ahk_group ActiveGameGroup"))
+UpdateRButtonSuppression(RunAlways ? true : WinActive("ahk_group ActiveGameGroup"))
 SetTimer, CoreLoop, 10
 return
 
@@ -217,14 +230,19 @@ return
 ; ==========================================
 
 CoreLoop:
-    isGameActive := WinActive("ahk_group ActiveGameGroup")
+    isGameActive := RunAlways ? true : WinActive("ahk_group ActiveGameGroup")
     UpdateRButtonSuppression(isGameActive)
     
     if (isGameActive) { 
         MouseGetPos, xpos, ypos
         
         if (EnableMouseLock || EnableVerticalLine) {
-            WinGetPos, nWx, nWy, nWw, nWh, ahk_group ActiveGameGroup 
+            if (RunAlways) {
+                nWx := 0, nWy := 0, nWw := A_ScreenWidth, nWh := A_ScreenHeight
+            } else {
+                WinGetPos, nWx, nWy, nWw, nWh, ahk_group ActiveGameGroup 
+            }
+
             if (nWx != Wx || nWy != Wy || nWw != Ww || nWh != Wh) {
                 Wx := nWx, Wy := nWy, Ww := nWw, Wh := nWh
                 NumPut(Wx, Rect, 0, "Int"), NumPut(Wy, Rect, 4, "Int")
@@ -286,11 +304,11 @@ CoreLoop:
         
         ; Consolidated Polling Calls
         UpdateVirtualAxis("LX", true, LX_D, LX_A, LX_Antideadzone)
-		UpdateVirtualAxis("LY", true, LY_D, LY_A, LY_Antideadzone)
-		UpdateVirtualAxis("RX", true, RX_D, RX_A, RX_Antideadzone)
-		UpdateVirtualAxis("RY", true, RY_D, RY_A, RY_Antideadzone)
-		UpdateVirtualAxis("LT", false, LT_D, LT_A, LT_Antideadzone)
-		UpdateVirtualAxis("RT", false, RT_D, RT_A, RT_Antideadzone)
+        UpdateVirtualAxis("LY", true, LY_D, LY_A, LY_Antideadzone)
+        UpdateVirtualAxis("RX", true, RX_D, RX_A, RX_Antideadzone)
+        UpdateVirtualAxis("RY", true, RY_D, RY_A, RY_Antideadzone)
+        UpdateVirtualAxis("LT", false, LT_D, LT_A, LT_Antideadzone)
+        UpdateVirtualAxis("RT", false, RT_D, RT_A, RT_Antideadzone)
         
     } else if (FocusPass) {
         FocusLost()
@@ -299,8 +317,40 @@ CoreLoop:
 return
 
 ; ==========================================
-;                FUNCTIONS
+;                 FUNCTIONS
 ; ==========================================
+
+ParseConfigAliases(iniStr) {
+    obj := {}
+    Loop, Parse, iniStr, `,
+    {
+        parts := StrSplit(A_LoopField, ":")
+        if (parts.Length() == 2)
+            obj[Trim(parts[1])] := Trim(parts[2])
+    }
+    return obj
+}
+
+ParseExeMatches(iniStr) {
+    obj := {}
+    Pos := 1
+    ; Handles bracketed groupings "[a.exe,b.exe]:profile" and standard entries "c.exe:profile"
+    while (Pos := RegExMatch(iniStr, "O)(?:\[([^\]]+)\]|([^:,]+))\s*:\s*([^,]+)", M, Pos)) {
+        exesStr := M.Value(1) ? M.Value(1) : M.Value(2)
+        profile := Trim(M.Value(3))
+        
+        exeArr := []
+        Loop, Parse, exesStr, `,
+        {
+            t := Trim(A_LoopField)
+            if (t != "")
+                exeArr.Push(t)
+        }
+        obj[exeArr] := profile
+        Pos += M.Len(0)
+    }
+    return obj
+}
 
 ReadIni(file, key, section := "AnalogBinds") {
     IniRead, out, %file%, %section%, %key%, ERROR
@@ -430,11 +480,16 @@ Receive_WM_COPYDATA(wParam, lParam) {
 }
 
 CleanUp() {
-    global bindsPID
-    if (bindsPID)
+    global bindsPID, CCPath
+    if (bindsPID) {
         Process, Close, %bindsPID%
-    DllCall("ClipCursor", "Ptr", 0) ; Release the mouse on script death
-    DllCall("SystemParametersInfo", "UInt", 0x57, "UInt", 0, "Ptr", 0, "UInt", 0) ; Restore system cursor
+        Sleep, 50 
+    }
+    if (FileExist(CCPath)) {
+        FileDelete, %CCPath%
+    }
+    DllCall("ClipCursor", "Ptr", 0)
+    DllCall("SystemParametersInfo", "UInt", 0x57, "UInt", 0, "Ptr", 0, "UInt", 0)
 }
 
 ParseAnalog(iniStr) {
