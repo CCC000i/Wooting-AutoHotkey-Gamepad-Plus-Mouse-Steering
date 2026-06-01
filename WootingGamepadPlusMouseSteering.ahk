@@ -20,9 +20,10 @@ IfNotExist, %A_ScriptDir%\$WootingConfigs
 ; Read and dynamically parse the new configuration file
 IniRead, aliasStr, %settingsFile%, GlobalSettings, configAliases, % ""
 IniRead, exeStr, %settingsFile%, GlobalSettings, exeMatches, % ""
-
+IniRead, WootingEnabled, %settingsFile%, GlobalSettings, WootingEnabled, % ""
 Global configAliases := ParseConfigAliases(aliasStr)
 Global exeMatches := ParseExeMatches(exeStr)
+Global WootingEnabled := WootingEnabled
 
 ; === Global State & Constants ===
 Global SysCursorsList := [32512, 32513, 32514, 32515, 32516, 32642, 32643, 32644, 32645, 32646, 32648, 32649, 32650]
@@ -95,7 +96,8 @@ if (matchedConfig == "") {
 Global ahi := new AutoHotInterception()
 Global pad := new ViGEmXb360()
 Global sw := SimpleWooting_v1
-sw.Init()
+if WootingEnabled = true
+	sw.Init()
 Global MouseIds := []
 for _, dev in ahi.GetDeviceList() {
     if (dev.IsMouse)
@@ -380,7 +382,8 @@ UpdateVirtualAxis(axis, isStick, ByRef dArray, ByRef aArray, adz) {
     ; 2. Process Analog Inputs if no digital override
     if (!hasDigital) {
         for key, value in aArray {
-            rawVal := sw.RP(key)
+			if WootingEnabled = true
+				rawVal := sw.RP(key)
             if (WootingDeadzone > 0)
                 rawVal := (rawVal <= WootingDeadzone) ? 0 : (rawVal - WootingDeadzone) * WD_Mult
             pressure += rawVal * value

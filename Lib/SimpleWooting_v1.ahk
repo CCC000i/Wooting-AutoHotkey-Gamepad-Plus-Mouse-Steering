@@ -6,7 +6,7 @@
 class SimpleWooting_v1 {
     static hModule := 0
 
-    Init(dllPath := "wooting_analog_sdk.dll") {
+	Init(dllPath := "wooting_analog_sdk.dll") {
         if this.hModule
             return true
         
@@ -16,7 +16,9 @@ class SimpleWooting_v1 {
         }
 
         if (DllCall("wooting_analog_sdk\wooting_analog_initialise", "Cdecl Int") < 0) {
-            this.Close()
+            ; Initialization failed. Free the library without calling uninitialise.
+            DllCall("FreeLibrary", "Ptr", this.hModule)
+            this.hModule := 0
             return false
         }
         return true
