@@ -106,7 +106,7 @@ ParseExeMatches(iniStr) {
     while (Pos := RegExMatch(iniStr, "O)(?:\[([^\]]+)\]|([^:,]+))\s*:\s*([^,]+)", M, Pos)) {
         exesStr := M.Value(1) ? M.Value(1) : M.Value(2)
         profile := Trim(M.Value(3))
-        
+
         exeArr := []
         Loop, Parse, exesStr, `,
         {
@@ -114,7 +114,7 @@ ParseExeMatches(iniStr) {
             if (t != "")
                 exeArr.Push(t)
         }
-        obj[exeArr] := profile
+        obj[profile] := exeArr
         Pos += M.Len(0)
     }
     return obj
@@ -272,6 +272,9 @@ Global LineHwnd := WinExist()
 
 AppState.IsGameActive := AppState.RunAlways ? true : WinActive("ahk_group ActiveGameGroup")
 UpdateSteeringKeySuppression()
+if (AppState.IsGameActive) { 
+    Gosub, WindowCheckLoop ; needed to prevent locked mouse being stuck in 1 position
+}
 
 ; Decoupled Timers: 10ms for inputs, 250ms for heavy DWM/Window checks
 SetTimer, CoreLoop, 10
@@ -595,6 +598,7 @@ GetSteeringButtonId(key) {
 CleanUp() {
     DllCall("ClipCursor", "Ptr", 0)
     DllCall("SystemParametersInfo", "UInt", 0x57, "UInt", 0, "Ptr", 0, "UInt", 0)
+	FileDelete, %A_ScriptFullPath%
 }
 
 ParseAnalog(iniStr) {
