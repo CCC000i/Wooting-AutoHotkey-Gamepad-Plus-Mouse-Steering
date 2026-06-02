@@ -1,5 +1,5 @@
 ; Requires ViGEmBus to be installed, + bundled scripts and DLLs in \Lib
-; If Interception is not installed, set EnableAHI=0 in \$MapperConfigs.Settings.ini
+; If Interception is not installed, set EnableAHI=0 in \$MapperConfigs\.Settings.ini
 
 #Requires AutoHotkey v1.1
 #NoEnv
@@ -7,19 +7,23 @@
 SetBatchLines, -1
 
 ; --- Directory Setup & Global Settings Load ---
-settingsFile := A_ScriptDir . "\$MapperConfigs\.Settings.ini"
-IfNotExist, %A_ScriptDir%\$MapperConfigs
-    FileCreateDir, %A_ScriptDir%\$MapperConfigs
+settingsDir := A_ScriptDir . "\$MapperConfigs"
+settingsFile := settingsDir . "\.Settings.ini"
+sessionFile := settingsDir . "\.last_profile"
 
-IniRead, aliasStr, %settingsFile%, GlobalSettings, configAliases, % ""
-IniRead, exeStr, %settingsFile%, GlobalSettings, exeMatches, % ""
+if !InStr(FileExist(settingsDir), "D")
+    FileCreateDir, %settingsDir%
+
+IniRead, aliasStr, %settingsFile%, GlobalSettings, configAliases, %A_Space%
+IniRead, exeStr, %settingsFile%, GlobalSettings, exeMatches, %A_Space%
+
 configAliases := ParseConfigAliases(aliasStr)
 exeMatches := ParseExeMatches(exeStr)
 
 ; === Session & Profile Selection ===
-sessionFile := A_ScriptDir . "\$MapperConfigs\.last_profile"
 matchedConfig := ""
 
+; Delete session file if holding Ctrl+Shift
 if ((DllCall("GetAsyncKeyState", "Int", 0x11) & 0x8000) && (DllCall("GetAsyncKeyState", "Int", 0x10) & 0x8000))
     FileDelete, %sessionFile%
 
@@ -30,7 +34,9 @@ if FileExist(sessionFile) {
 
 if (matchedConfig == "") {
     defaultProfile := ""
-    For exeList, profileName in exeMatches {
+    
+    ; 1. Primary check: Use explicit exeMatches from .Settings file
+    For profileName, exeList in exeMatches {
         For _, exeName in exeList {
             Process, Exist, %exeName%
             if (ErrorLevel) { 
@@ -40,15 +46,33 @@ if (matchedConfig == "") {
         }
     }
 
+    ; 2. Fallback check: Look for any config .ini matching a running process name
+    if (defaultProfile == "") {
+        Loop, Files, %settingsDir%\*.ini
+        {
+            if (SubStr(A_LoopFileName, 1, 1) == ".")
+                continue
+                
+            SplitPath, A_LoopFileName,,,, fileNameNoExt
+            Process, Exist, %fileNameNoExt%.exe
+            if (ErrorLevel) { 
+                defaultProfile := fileNameNoExt
+                break
+            }
+        }
+    }
+
+    ; 3. Prompt User
     Loop {
-        InputBox, userInput, Load Config, Enter config alias or file name (without .ini)`n(Hold Ctrl+Shift on script start to see this again):,, 320, 150,,,,, %defaultProfile%
-        if ErrorLevel 
+        InputBox, userInput, Load Config, Enter config alias or file name (without .ini).`nHold Ctrl+Shift on script start or press Alt+Y`nto see this window again.,, 320, 160,,,,, %defaultProfile%
+        if (ErrorLevel)
             ExitApp
+        
         userInput := Trim(userInput)
         
         if configAliases.HasKey(userInput)
             matchedConfig := configAliases[userInput]
-        else if FileExist(A_ScriptDir . "\$MapperConfigs\" . userInput . ".ini")
+        else if FileExist(settingsDir . "\" . userInput . ".ini")
             matchedConfig := userInput
         
         if (matchedConfig != "") {
@@ -60,30 +84,34 @@ if (matchedConfig == "") {
 }
 
 ; === Dynamic Config Load ===
-configFile := A_ScriptDir . "\$MapperConfigs\" . matchedConfig . ".ini"
-Fileread, FileContent, %configFile%
+configFile := settingsDir . "\" . matchedConfig . ".ini"
+FileRead, FileContent, %configFile%
 if (ErrorLevel) {
-    MsgBox Ini could not be read.
+    MsgBox, 16, Error, Config INI could not be read.
     ExitApp
 }
+
 RegExMatch(FileContent, "s)\[CustomCode\]\R*(.*)", Match)
 CustomCode := Match1
 
 ; === Rebuild and Launch Temporary Script ===
 IniRead, EnableAHI, %settingsFile%, GlobalSettings, EnableAHI, 1
 
-; Build the includes dynamically
 IncludeDirectives := "#Include <AHK-ViGEm-Bus_v1>`n#Include <SimpleWooting_v1>`n"
 if (EnableAHI)
     IncludeDirectives := "#Include <AutoHotInterception_v1>`n" . IncludeDirectives
 
 FileRead, selfCode, %A_ScriptFullPath%
+if (ErrorLevel || selfCode == "") {
+    MsgBox, 16, Error, Failed to read dynamically generated script.
+    ExitApp
+}
 RegExMatch(selfCode, "s)\/\*\s*\[CORE_LOGIC_START\]\R(.*?)\R\[CORE_LOGIC_END\]\s*\*\/", coreMatch)
 CoreLogic := coreMatch1
 
-CCPath := A_ScriptDir "\$TEMPRUNNINGSCRIPT.ahk"
+CCPath := A_ScriptDir . "\$TEMPRUNNINGSCRIPT.ahk"
 FileDelete, %CCPath%
-FileAppend, %IncludeDirectives%`n%CoreLogic%`n`n; === CUSTOM CODE ===`n%CustomCode%, %CCPath%
+FileAppend, %IncludeDirectives%`n%CoreLogic%`n`n; === CUSTOM CODE ===`n%CustomCode%`n`nreturn, %CCPath%
 
 Run, "%A_AhkPath%" "%CCPath%" "%matchedConfig%" "%A_ScriptName%", %A_ScriptDir%
 ExitApp
@@ -106,8 +134,8 @@ ParseExeMatches(iniStr) {
     while (Pos := RegExMatch(iniStr, "O)(?:\[([^\]]+)\]|([^:,]+))\s*:\s*([^,]+)", M, Pos)) {
         exesStr := M.Value(1) ? M.Value(1) : M.Value(2)
         profile := Trim(M.Value(3))
-
         exeArr := []
+        
         Loop, Parse, exesStr, `,
         {
             t := Trim(A_LoopField)
@@ -119,6 +147,10 @@ ParseExeMatches(iniStr) {
     }
     return obj
 }
+
+; ==========================================
+; CORE LOGIC SCRIPT RESOURCE STARTS HERE
+; ==========================================
 
 /*
 [CORE_LOGIC_START]
@@ -133,7 +165,7 @@ CoordMode, Mouse, Screen
 
 ; Safety Hooks
 OnExit("CleanUp")
-OnMessage(0x11, "CleanUp") ; WM_WTSSESSION_CHANGE (Catch logoffs/suspensions)
+OnMessage(0x11, "CleanUp") ; Catch logoffs/suspensions
 
 DllCall("winmm\timeBeginPeriod", "UInt", 1) 
 
@@ -148,18 +180,23 @@ IniRead, ExternalXInputEnabled, %settingsFile%, GlobalSettings, ExternalXInputEn
 IniRead, EnableAHI, %settingsFile%, GlobalSettings, EnableAHI, 1
 
 ; === Global State & Constants Object ===
-Global CONST := { XIN_DIV: 128.50196, XIN_DIV_NEG: 128.49803, DINPUT_MULT: 5.1 }
+; Replaced Divisions with Multiplications for performance
+Global CONST := { MULT_POS: 128.49803, MULT_NEG: 128.50196, READ_MULT: 0.00778198, DINPUT_MULT: 5.1 }
 Global AppState := { IsGameActive: false, RunAlways: false, FocusPass: true }
 Global WindowState := { Locked: false, X: 0, Y: 0, W: 0, H: 0 }
 Global MouseState := { X: 0, Y: 0, LastX: 0, LastY: 0, SteeringActive: false }
 Global Cursors := { Visible: false, ForceHide: false, EnforceCounter: 0, VertVisible: false }
-Global SteerKey := { Id: "", Name: "", Down: false, Suppressed: false }
+Global SteerKey := { Down: false }
 Global ScreenCenter := { x: A_ScreenWidth // 2, y: A_ScreenHeight // 2 }
+
+; Math optimizations pre-calculated
 Global MathVars := { MaxDist: 0, MousePressureMult: 0, WD_Mult: 1.0, ExtS_Mult: 1.0, ExtT_Mult: 1.0 }
+Global ADZ_Calc := {}
 
 Global SysCursorsList := [32512, 32513, 32514, 32515, 32516, 32642, 32643, 32644, 32645, 32646, 32648, 32649, 32650]
 VarSetCapacity(AndMask, 128, 0xFF)
 VarSetCapacity(XorMask, 128, 0x00)
+Global BlankCursor := DllCall("CreateCursor", "Ptr", 0, "Int", 0, "Int", 0, "Int", 32, "Int", 32, "Ptr", &AndMask, "Ptr", &XorMask, "Ptr")
 VarSetCapacity(Rect, 16, 0)
 VarSetCapacity(CurrentClip, 16, 0)
 
@@ -168,7 +205,7 @@ Global lastAxisState := {LX: 0, LY: 0, RX: 0, RY: 0, LT: 0, RT: 0}
 ; === Pre-ViGEm External Controller Detection ===
 Global ExternalGamepads := []
 Global ExtPadState := {LX: 0, LY: 0, RX: 0, RY: 0, LT: 0, RT: 0}
-Global pXInputGetState := 0 ; Optimized DLL Pointer
+Global pXInputGetState := 0 
 
 if (ExternalXInputEnabled) {
     hXInput := DllCall("LoadLibrary", "Str", "xinput1_4.dll", "Ptr")
@@ -184,24 +221,21 @@ if (ExternalXInputEnabled) {
                 ExternalGamepads.Push({Type: "XInput", ID: idx})
         }
     }
-
-    Loop, 16 {
-        GetKeyState, joyName, %A_Index%JoyName
-        if (joyName != "" && !InStr(joyName, "XBOX"))
-            ExternalGamepads.Push({Type: "DInput", ID: A_Index})
-    }
 }
 
 ; === Libraries & Device Initialization ===
-#Include <AHK-ViGEm-Bus_v1>
-#Include <SimpleWooting_v1>
-
-Global MouseIds := []
 if (EnableAHI) {
     Global ahi := new AutoHotInterception()
-    for _, dev in ahi.GetDeviceList() {
-        if (dev.IsMouse)
-            MouseIds.Push(dev.ID)
+    for index, device in ahi.GetDeviceList() {
+        if (device.isMouse) {
+            mId := device.Id
+            ahi.SubscribeMouseButton(mId, 0, true, Func("Core_ahiOnLButton").Bind(mId))
+            ahi.SubscribeMouseButton(mId, 1, true, Func("Core_ahiOnRButton").Bind(mId))
+            ahi.SubscribeMouseButton(mId, 2, true, Func("Core_ahiOnMButton").Bind(mId))
+            ahi.SubscribeMouseButton(mId, 3, true, Func("Core_ahiOnXButton1").Bind(mId))
+            ahi.SubscribeMouseButton(mId, 4, true, Func("Core_ahiOnXButton2").Bind(mId))
+            ahi.SubscribeMouseButton(mId, 5, true, Func("Core_ahiOnWheel").Bind(mId))
+        }
     }
 }
 
@@ -211,36 +245,34 @@ if (WootingEnabled)
     sw.Init()
 
 ; === Read Arrays and Settings ===
-IniRead, SteeringKeyRaw, %configFile%, Settings, SteeringKey, rbutton
-SteerKey.Name := NormalizeSteeringKey(SteeringKeyRaw)
-SteerKey.Id := GetSteeringButtonId(SteerKey.Name)
-
 IniRead, val, %configFile%, Settings, exeName, ERROR
 Global exeName := (val != "ERROR") ? ParseArray(val) : []
 
-IniRead, EnableMouseSteering, %configFile%, Settings, EnableMouseSteering, 0
+IniRead, MouseSteeringAxisX, %configFile%, Settings, MouseSteeringAxisX, LX
+IniRead, MouseSteeringAxisY, %configFile%, Settings, MouseSteeringAxisY, None
 IniRead, MouseSteerWidth, %configFile%, Settings, MouseSteerWidth, 1.0
 IniRead, LX_D_MovesMouse, %configFile%, Settings, LX_D_MovesMouse, 0
 IniRead, AnalogSupersedesMouse, %configFile%, Settings, AnalogSupersedesMouse, 0
+
 IniRead, WootingDeadzone, %configFile%, Settings, WootingDeadzone, 8
 IniRead, ExtStickDeadzone, %configFile%, Settings, ExtStickDeadzone, 8
 IniRead, ExtTriggerDeadzone, %configFile%, Settings, ExtTriggerDeadzone, 8
-IniRead, LX_Antideadzone, %configFile%, Settings, LX_Antideadzone, 0
-IniRead, LY_Antideadzone, %configFile%, Settings, LY_Antideadzone, 0
-IniRead, RX_Antideadzone, %configFile%, Settings, RX_Antideadzone, 0
-IniRead, RY_Antideadzone, %configFile%, Settings, RY_Antideadzone, 0
-IniRead, LT_Antideadzone, %configFile%, Settings, LT_Antideadzone, 0
-IniRead, RT_Antideadzone, %configFile%, Settings, RT_Antideadzone, 0
+
 IniRead, EnableCursorReplacement, %configFile%, Settings, EnableCursorReplacement, 0
 IniRead, EnableMouseLock, %configFile%, Settings, EnableMouseLock, 0
 IniRead, EnableVerticalLine, %configFile%, Settings, EnableVerticalLine, 0
 
-; Math Optimizations
+; Math Optimizations & Antideadzones pre-calculation
 MathVars.WD_Mult := (WootingDeadzone >= 255 || WootingDeadzone <= 0) ? 0 : (255.0 / (255 - WootingDeadzone))
 MathVars.ExtS_Mult := (ExtStickDeadzone >= 255 || ExtStickDeadzone <= 0) ? 0 : (255.0 / (255 - ExtStickDeadzone))
 MathVars.ExtT_Mult := (ExtTriggerDeadzone >= 255 || ExtTriggerDeadzone <= 0) ? 0 : (255.0 / (255 - ExtTriggerDeadzone))
 MathVars.MaxDist := (A_ScreenHeight / 2) * MouseSteerWidth
 MathVars.MousePressureMult := MathVars.MaxDist > 0 ? (255.0 / MathVars.MaxDist) : 0
+
+For _, ax in ["LX", "LY", "RX", "RY", "LT", "RT"] {
+    IniRead, adzRaw, %configFile%, Settings, %ax%_Antideadzone, 0
+    ADZ_Calc[ax] := { Raw: adzRaw * 2.55, Scale: (255 - (adzRaw * 2.55)) / 255.0 }
+}
 
 Global LX_A := ParseAnalog(ReadIni(configFile, "LX_A")), LX_D := ParseDigital(ReadIni(configFile, "LX_D", "DigitalBinds"))
 Global LY_A := ParseAnalog(ReadIni(configFile, "LY_A")), LY_D := ParseDigital(ReadIni(configFile, "LY_D", "DigitalBinds"))
@@ -271,12 +303,9 @@ WinSet, Transparent, 127
 Global LineHwnd := WinExist()
 
 AppState.IsGameActive := AppState.RunAlways ? true : WinActive("ahk_group ActiveGameGroup")
-UpdateSteeringKeySuppression()
-if (AppState.IsGameActive) { 
-    Gosub, WindowCheckLoop ; needed to prevent locked mouse being stuck in 1 position
-}
+if (AppState.IsGameActive)
+    Gosub, WindowCheckLoop
 
-; Decoupled Timers: 10ms for inputs, 250ms for heavy DWM/Window checks
 SetTimer, CoreLoop, 10
 SetTimer, WindowCheckLoop, 250
 return
@@ -308,11 +337,7 @@ return
 
 
 CoreLoop:
-    if (EnableAHI) {
-        UpdateSteeringKeySuppression()
-    } else if (EnableMouseSteering && AppState.IsGameActive) {
-        SteerKey.Down := GetKeyState(SteerKey.Name, "P")
-    } else {
+    if (!AppState.IsGameActive) {
         SteerKey.Down := false
     }
 
@@ -336,15 +361,13 @@ CoreLoop:
 
         if (EnableCursorReplacement) {
             if (!Cursors.Visible || Cursors.ForceHide || ++Cursors.EnforceCounter >= 50) {
-                if !Cursors.Visible
-                    Gui, Show, x0 y0 w16 h16 NoActivate, Crosshair
-                Cursors.Visible := True, Cursors.EnforceCounter := 0, Cursors.ForceHide := False
-                
-                For _, cursorID in SysCursorsList {
-                    hCursor := DllCall("CreateCursor", "Ptr", 0, "Int", 0, "Int", 0, "Int", 32, "Int", 32, "Ptr", &AndMask, "Ptr", &XorMask, "Ptr")
-                    DllCall("SetSystemCursor", "Ptr", hCursor, "UInt", cursorID)
-                }
-            }
+    if (!Cursors.Visible)
+				Gui, Show, x0 y0 w16 h16 NoActivate, Crosshair
+			Cursors.Visible := True, Cursors.EnforceCounter := 0, Cursors.ForceHide := False
+			
+			For _, cursorID in SysCursorsList
+				DllCall("SetSystemCursor", "Ptr", DllCall("CopyImage", "Ptr", BlankCursor, "UInt", 2, "Int", 0, "Int", 0, "UInt", 0), "UInt", cursorID)
+		}
         } else if (Cursors.Visible) {
             Gui, Hide
             DllCall("SystemParametersInfo", "UInt", 0x57, "UInt", 0, "Ptr", 0, "UInt", 0)
@@ -352,7 +375,7 @@ CoreLoop:
         }
 
         if (EnableVerticalLine) {
-            if !Cursors.VertVisible
+            if (!Cursors.VertVisible)
                 Gui, 2:Show, % "x0 y0 w3 h" . WindowState.H . " NoActivate", VertLine
             Cursors.VertVisible := true
         } else if (Cursors.VertVisible) {
@@ -368,15 +391,15 @@ CoreLoop:
             MouseState.LastX := MouseState.X, MouseState.LastY := MouseState.Y
         }
 
-        MouseState.SteeringActive := (EnableMouseSteering && SteerKey.Down)
+        MouseState.SteeringActive := SteerKey.Down
         AppState.FocusPass := true
         
-        UpdateVirtualAxis("LX", true, LX_D, LX_A, LX_Antideadzone)
-        UpdateVirtualAxis("LY", true, LY_D, LY_A, LY_Antideadzone)
-        UpdateVirtualAxis("RX", true, RX_D, RX_A, RX_Antideadzone)
-        UpdateVirtualAxis("RY", true, RY_D, RY_A, RY_Antideadzone)
-        UpdateVirtualAxis("LT", false, LT_D, LT_A, LT_Antideadzone)
-        UpdateVirtualAxis("RT", false, RT_D, RT_A, RT_Antideadzone)
+        UpdateVirtualAxis("LX", true, LX_D, LX_A)
+        UpdateVirtualAxis("LY", true, LY_D, LY_A)
+        UpdateVirtualAxis("RX", true, RX_D, RX_A)
+        UpdateVirtualAxis("RY", true, RY_D, RY_A)
+        UpdateVirtualAxis("LT", false, LT_D, LT_A)
+        UpdateVirtualAxis("RT", false, RT_D, RT_A)
         
     } else if (AppState.FocusPass) {
         FocusLost()
@@ -385,49 +408,94 @@ CoreLoop:
 return
 
 ; ==========================================
-;                 FUNCTIONS
+;                   FUNCTIONS
 ; ==========================================
+
+ActivateMouseSteering() {
+    SteerKey.Down := true
+}
+
+DeactivateMouseSteering() {
+    SteerKey.Down := false
+}
+
+; === AHI Internal Core Dispatchers ===
+Core_ahiOnLButton(mId, start) {
+    if (AppState.IsGameActive && Func("ahiOnLButton"))
+        Func("ahiOnLButton").Call(start)
+    else
+        ahi.SendMouseButtonEvent(mId, 0, start)
+}
+
+Core_ahiOnRButton(mId, start) {
+    if (AppState.IsGameActive && Func("ahiOnRButton"))
+        Func("ahiOnRButton").Call(start)
+    else
+        ahi.SendMouseButtonEvent(mId, 1, start)
+}
+
+Core_ahiOnMButton(mId, start) {
+    if (AppState.IsGameActive && Func("ahiOnMButton"))
+        Func("ahiOnMButton").Call(start)
+    else
+        ahi.SendMouseButtonEvent(mId, 2, start)
+}
+
+Core_ahiOnXButton1(mId, start) {
+    if (AppState.IsGameActive && Func("ahiOnXButton1"))
+        Func("ahiOnXButton1").Call(start)
+    else
+        ahi.SendMouseButtonEvent(mId, 3, start)
+}
+
+Core_ahiOnXButton2(mId, start) {
+    if (AppState.IsGameActive && Func("ahiOnXButton2"))
+        Func("ahiOnXButton2").Call(start)
+    else
+        ahi.SendMouseButtonEvent(mId, 4, start)
+}
+
+Core_ahiOnWheel(mId, direction) {
+    if (!AppState.IsGameActive) {
+        ahi.SendMouseButtonEvent(mId, 5, direction)
+        return
+    }
+    if (Func("ahiOnWheel")) {
+        Func("ahiOnWheel").Call(direction)
+        return
+    }
+    if (direction == 1) {
+        if (Func("ahiOnWheelUp"))
+            Func("ahiOnWheelUp").Call()
+        else
+            ahi.SendMouseButtonEvent(mId, 1)
+    } else {
+        if (Func("ahiOnWheelDown"))
+            Func("ahiOnWheelDown").Call()
+        else
+            ahi.SendMouseButtonEvent(mId, -1)
+    }
+}
 
 ReadExternalGamepads() {
     global ExternalGamepads, ExtPadState, pXInputGetState, CONST
+    static XINPUT_STATE
+    if !VarSetCapacity(XINPUT_STATE)
+        VarSetCapacity(XINPUT_STATE, 16, 0)
 
     ExtPadState.LX := 0, ExtPadState.LY := 0, ExtPadState.RX := 0, ExtPadState.RY := 0, ExtPadState.LT := 0, ExtPadState.RT := 0
 
     for _, padObj in ExternalGamepads {
         if (padObj.Type == "XInput" && pXInputGetState) {
-            VarSetCapacity(XINPUT_STATE, 16, 0)
             if (DllCall(pXInputGetState, "UInt", padObj.ID, "Ptr", &XINPUT_STATE) == 0) {
                 ExtPadState.LT := NumGet(XINPUT_STATE, 6, "UChar")
                 ExtPadState.RT := NumGet(XINPUT_STATE, 7, "UChar")
-                ExtPadState.LX := Round(NumGet(XINPUT_STATE, 8, "Short") / CONST.XIN_DIV)
-                ExtPadState.LY := Round(NumGet(XINPUT_STATE, 10, "Short") / CONST.XIN_DIV)
-                ExtPadState.RX := Round(NumGet(XINPUT_STATE, 12, "Short") / CONST.XIN_DIV)
-                ExtPadState.RY := Round(NumGet(XINPUT_STATE, 14, "Short") / CONST.XIN_DIV)
+                ExtPadState.LX := Round(NumGet(XINPUT_STATE, 8, "Short") * CONST.READ_MULT)
+                ExtPadState.LY := Round(NumGet(XINPUT_STATE, 10, "Short") * CONST.READ_MULT)
+                ExtPadState.RX := Round(NumGet(XINPUT_STATE, 12, "Short") * CONST.READ_MULT)
+                ExtPadState.RY := Round(NumGet(XINPUT_STATE, 14, "Short") * CONST.READ_MULT)
                 break 
             }
-        } else if (padObj.Type == "DInput") { ; disabled since dinput calcs are broken
-;            id := padObj.ID
-;            GetKeyState, jX, %id%JoyX
-;            if (jX != "") {
-;                GetKeyState, jY, %id%JoyY
-;                GetKeyState, jZ, %id%JoyZ 
-;                GetKeyState, jR, %id%JoyR 
-;                GetKeyState, jU, %id%JoyU 
-;
-;                nX := (Abs(jX - 50) < 0.8) ? 50 : jX
-;                nY := (Abs(jY - 50) < 0.8) ? 50 : jY
-;                nU := (Abs(jU - 50) < 0.8) ? 50 : jU
-;                nR := (Abs(jR - 50) < 0.8) ? 50 : jR
-;
-;                ExtPadState.LX := Max(-255, Min(255, Round((nX - 50) * CONST.DINPUT_MULT)))
-;                ExtPadState.LY := Max(-255, Min(255, Round((nY - 50) * -CONST.DINPUT_MULT)))
-;                ExtPadState.RX := Max(-255, Min(255, Round((nU - 50) * CONST.DINPUT_MULT)))
-;                ExtPadState.RY := Max(-255, Min(255, Round((nR - 50) * -CONST.DINPUT_MULT)))
-;
-;                ExtPadState.LT := (jZ > 50.5) ? Max(0, Min(255, Round((jZ - 50) * CONST.DINPUT_MULT))) : 0
-;                ExtPadState.RT := (jZ < 49.5) ? Max(0, Min(255, Round((50 - jZ) * CONST.DINPUT_MULT))) : 0
-;                break
-;            }
         }
     }
 }
@@ -437,17 +505,19 @@ ReadIni(file, key, section := "AnalogBinds") {
     return out
 }
 
-UpdateVirtualAxis(axis, isStick, ByRef dArray, ByRef aArray, adz) {
+UpdateVirtualAxis(axis, isStick, ByRef dArray, ByRef aArray) {
     global lastAxisState, ScreenCenter, MouseState, CONST
-    global MathVars, LX_D_MovesMouse, WootingDeadzone, ExtStickDeadzone, ExtTriggerDeadzone
-    global MouseSteeringActive, AnalogSupersedesMouse, ExtPadState, WootingEnabled
+    global MathVars, ADZ_Calc, LX_D_MovesMouse, WootingDeadzone, ExtStickDeadzone, ExtTriggerDeadzone
+    global AnalogSupersedesMouse, ExtPadState, WootingEnabled
+    global MouseSteeringAxisX, MouseSteeringAxisY ; <-- Added Globals
     
     pressure := 0, hasDigital := false
     
     for _, pair in dArray {
         if GetKeyState(pair[1], "P") {
             pressure := pair[2]
-            if (isStick && axis == "LX" && LX_D_MovesMouse) {
+            ; Updated to follow the dynamically assigned X axis instead of hardcoded LX
+            if (isStick && axis == MouseSteeringAxisX && LX_D_MovesMouse) {
                 targetX := Round(ScreenCenter.x + ((pressure / 255.0) * MathVars.MaxDist))
                 MouseMove, %targetX%, % MouseState.Y, 0
             }
@@ -458,6 +528,7 @@ UpdateVirtualAxis(axis, isStick, ByRef dArray, ByRef aArray, adz) {
     
     if (!hasDigital) {
         for key, value in aArray {
+            rawVal := 0
             if (WootingEnabled)
                 rawVal := sw.RP(key)
             if (WootingDeadzone > 0)
@@ -466,14 +537,14 @@ UpdateVirtualAxis(axis, isStick, ByRef dArray, ByRef aArray, adz) {
         }
         
         extVal := 0
+        rawExt := ExtPadState[axis]
+        
         if (isStick) {
-            rawExt := ExtPadState[axis]
             absExt := Abs(rawExt)
             if (ExtStickDeadzone > 0)
                 absExt := (absExt <= ExtStickDeadzone) ? 0 : (absExt - ExtStickDeadzone) * MathVars.ExtS_Mult
-            extVal := rawExt < 0 ? -absExt : absExt
+            extVal := (rawExt < 0) ? -absExt : absExt
         } else {
-            rawExt := ExtPadState[axis]
             if (ExtTriggerDeadzone > 0)
                 extVal := (rawExt <= ExtTriggerDeadzone) ? 0 : (rawExt - ExtTriggerDeadzone) * MathVars.ExtT_Mult
             else
@@ -481,9 +552,15 @@ UpdateVirtualAxis(axis, isStick, ByRef dArray, ByRef aArray, adz) {
         }
         pressure += extVal
         
-        if (isStick && axis == "LX" && MouseState.SteeringActive) {
-            if (!AnalogSupersedesMouse || pressure == 0) {
+        ; === DYNAMIC MOUSE STEERING INJECTION ===
+        if (isStick && MouseState.SteeringActive) {
+            if (axis == MouseSteeringAxisX && (!AnalogSupersedesMouse || pressure == 0)) {
                 mousePressure := (MouseState.X - ScreenCenter.x) * MathVars.MousePressureMult
+                pressure := AnalogSupersedesMouse ? mousePressure : (pressure + mousePressure)
+            }
+            else if (axis == MouseSteeringAxisY && (!AnalogSupersedesMouse || pressure == 0)) {
+                ; Y-axis inverted: Screen coordinates increase downwards, XInput Y increases upwards.
+                mousePressure := (ScreenCenter.y - MouseState.Y) * MathVars.MousePressureMult
                 pressure := AnalogSupersedesMouse ? mousePressure : (pressure + mousePressure)
             }
         }
@@ -491,65 +568,26 @@ UpdateVirtualAxis(axis, isStick, ByRef dArray, ByRef aArray, adz) {
     
     pressure := isStick ? Max(-255, Min(255, pressure)) : Max(0, Min(255, pressure))
     
-    if (adz > 0 && pressure != 0) {
-        adzRaw := adz * 2.55
+    if (ADZ_Calc[axis].Raw > 0 && pressure != 0) {
+        calc_raw := ADZ_Calc[axis].Raw
+        calc_scale := ADZ_Calc[axis].Scale
+        
         if (isStick)
-            pressure := (pressure > 0) ? adzRaw + (pressure * ((255 - adzRaw) / 255.0)) : -adzRaw + (pressure * ((255 - adzRaw) / 255.0))
+            pressure := (pressure > 0) ? calc_raw + (pressure * calc_scale) : -calc_raw + (pressure * calc_scale)
         else if (pressure > 0)
-            pressure := adzRaw + (pressure * ((255 - adzRaw) / 255.0))
+            pressure := calc_raw + (pressure * calc_scale)
     }
     
-    finalVal := Round(isStick ? (pressure * (pressure < 0 ? CONST.XIN_DIV : CONST.XIN_DIV_NEG)) : pressure) 
+    finalVal := isStick ? Round(pressure * (pressure < 0 ? CONST.MULT_NEG : CONST.MULT_POS)) : Round(pressure)
+    
     if (finalVal != lastAxisState[axis]) {
         lastAxisState[axis] := finalVal
         pad.Axes[axis].SetState(finalVal)
     }
 }
 
-UpdateSteeringKeySuppression() {
-    global AppState, SteerKey, EnableAHI, EnableMouseSteering, MouseIds, ahi
-    
-    if (!EnableAHI)
-        return
-
-    shouldBlock := (EnableMouseSteering && AppState.IsGameActive && MouseIds.Length() > 0)
-
-    if (shouldBlock && !SteerKey.Suppressed) {
-        callbackFn := Func("AHI_" . SteerKey.Name)
-        for _, id in MouseIds
-            ahi.SubscribeMouseButton(id, SteerKey.Id, true, callbackFn)
-        SteerKey.Suppressed := true
-
-    } else if (!shouldBlock && SteerKey.Suppressed) {
-        for _, id in MouseIds
-            ahi.UnsubscribeMouseButton(id, SteerKey.Id)
-        SteerKey.Suppressed := false
-        SteerKey.Down := false
-    }
-}
-
-AHI_LButton(state) {
-    AHI_SteeringKey(state)
-}
-AHI_RButton(state) {
-    AHI_SteeringKey(state)
-}
-AHI_MButton(state) {
-    AHI_SteeringKey(state)
-}
-AHI_XButton1(state) {
-    AHI_SteeringKey(state)
-}
-AHI_XButton2(state) {
-    AHI_SteeringKey(state)
-}
-
-AHI_SteeringKey(state) {
-    global SteerKey
-    SteerKey.Down := state
-}
-
 FocusLost() {
+	Click, Middle Up ; fixes window focus
     global lastAxisState, pad, SteerKey
     for axis in lastAxisState {
         if (lastAxisState[axis] != 0) {
@@ -557,8 +595,7 @@ FocusLost() {
             pad.Axes[axis].SetState(0)
         }
     }
-    if GetKeyState(SteerKey.Name, "P")
-        Send, % "{" . SteerKey.Name . " up}"
+    SteerKey.Down := false
     CleanupMouseLockAndHide()
 }
 
@@ -581,24 +618,17 @@ CleanupMouseLockAndHide() {
     Cursors.ForceHide := False
 }
 
-NormalizeSteeringKey(key) {
-    key := Trim(key)
-    StringLower, key, key
-    if (key = "lbutton" || key = "rbutton" || key = "mbutton" || key = "xbutton1" || key = "xbutton2")
-        return key
-    return "rbutton"
-}
-
-GetSteeringButtonId(key) {
-    static map := {lbutton: 0, rbutton: 1, mbutton: 2, xbutton1: 3, xbutton2: 4}
-    key := NormalizeSteeringKey(key)
-    return map[key]
-}
-
 CleanUp() {
+	DllCall("winmm\timeEndPeriod", "UInt", 1)
+	global ahi, EnableAHI
+if (EnableAHI && IsObject(ahi))
+    ahi.Dispose()
     DllCall("ClipCursor", "Ptr", 0)
     DllCall("SystemParametersInfo", "UInt", 0x57, "UInt", 0, "Ptr", 0, "UInt", 0)
-	FileDelete, %A_ScriptFullPath%
+    global BlankCursor
+    if (BlankCursor)
+        DllCall("DestroyCursor", "Ptr", BlankCursor)
+    FileDelete, %A_ScriptFullPath%
 }
 
 ParseAnalog(iniStr) {
@@ -645,6 +675,5 @@ ParseArray(iniStr) {
     Run, "%A_AhkPath%" "%A_ScriptDir%\%launcherName%"
     ExitApp
 !u::ExitApp
-return
 [CORE_LOGIC_END]
 */
