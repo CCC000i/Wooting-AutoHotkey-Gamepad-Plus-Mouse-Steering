@@ -1,6 +1,7 @@
 ; Requires ViGEmBus to be installed, + bundled scripts and DLLs in \Lib
 ; If Interception is not installed, set EnableAHI=0 in \$MapperConfigs\.Settings.ini
 
+Global ScriptStartTime := A_TickCount
 #Requires AutoHotkey v1.1
 #NoEnv
 #SingleInstance Force
@@ -88,6 +89,7 @@ configFile := settingsDir . "\" . matchedConfig . ".ini"
 FileRead, FileContent, %configFile%
 if (ErrorLevel) {
     MsgBox, 16, Error, Config INI could not be read.
+    FileDelete, %sessionFile%
     ExitApp
 }
 
@@ -180,6 +182,8 @@ IniRead, ExternalXInputEnabled, %settingsFile%, GlobalSettings, ExternalXInputEn
 IniRead, EnableAHI, %settingsFile%, GlobalSettings, EnableAHI, 1
 
 ; === Global State & Constants Object ===
+Global ScriptStartTime := A_TickCount
+Global lastChange := 0
 ; Replaced Divisions with Multiplications for performance
 Global CONST := { MULT_POS: 128.49803, MULT_NEG: 128.50196, READ_MULT: 0.00778198, DINPUT_MULT: 5.1 }
 Global AppState := { IsGameActive: false, RunAlways: false, FocusPass: true }
@@ -229,12 +233,20 @@ if (EnableAHI) {
     for index, device in ahi.GetDeviceList() {
         if (device.isMouse) {
             mId := device.Id
-            ahi.SubscribeMouseButton(mId, 0, true, Func("Core_ahiOnLButton").Bind(mId))
-            ahi.SubscribeMouseButton(mId, 1, true, Func("Core_ahiOnRButton").Bind(mId))
-            ahi.SubscribeMouseButton(mId, 2, true, Func("Core_ahiOnMButton").Bind(mId))
-            ahi.SubscribeMouseButton(mId, 3, true, Func("Core_ahiOnXButton1").Bind(mId))
-            ahi.SubscribeMouseButton(mId, 4, true, Func("Core_ahiOnXButton2").Bind(mId))
-            ahi.SubscribeMouseButton(mId, 5, true, Func("Core_ahiOnWheel").Bind(mId))
+            
+            ; Only subscribe to mouse events if the loaded profile contains the corresponding function
+            if (Func("ahiOnLButton"))
+                ahi.SubscribeMouseButton(mId, 0, true, Func("Core_ahiOnLButton").Bind(mId))
+            if (Func("ahiOnRButton"))
+                ahi.SubscribeMouseButton(mId, 1, true, Func("Core_ahiOnRButton").Bind(mId))
+            if (Func("ahiOnMButton"))
+                ahi.SubscribeMouseButton(mId, 2, true, Func("Core_ahiOnMButton").Bind(mId))
+            if (Func("ahiOnXButton1"))
+                ahi.SubscribeMouseButton(mId, 3, true, Func("Core_ahiOnXButton1").Bind(mId))
+            if (Func("ahiOnXButton2"))
+                ahi.SubscribeMouseButton(mId, 4, true, Func("Core_ahiOnXButton2").Bind(mId))
+            if (Func("ahiOnWheel"))
+                ahi.SubscribeMouseButton(mId, 5, true, Func("Core_ahiOnWheel").Bind(mId))
         }
     }
 }
@@ -362,12 +374,12 @@ CoreLoop:
         if (EnableCursorReplacement) {
             if (!Cursors.Visible || Cursors.ForceHide || ++Cursors.EnforceCounter >= 50) {
     if (!Cursors.Visible)
-				Gui, Show, x0 y0 w16 h16 NoActivate, Crosshair
-			Cursors.Visible := True, Cursors.EnforceCounter := 0, Cursors.ForceHide := False
-			
-			For _, cursorID in SysCursorsList
-				DllCall("SetSystemCursor", "Ptr", DllCall("CopyImage", "Ptr", BlankCursor, "UInt", 2, "Int", 0, "Int", 0, "UInt", 0), "UInt", cursorID)
-		}
+                Gui, Show, x0 y0 w16 h16 NoActivate, Crosshair
+            Cursors.Visible := True, Cursors.EnforceCounter := 0, Cursors.ForceHide := False
+            
+            For _, cursorID in SysCursorsList
+                DllCall("SetSystemCursor", "Ptr", DllCall("CopyImage", "Ptr", BlankCursor, "UInt", 2, "Int", 0, "Int", 0, "UInt", 0), "UInt", cursorID)
+        }
         } else if (Cursors.Visible) {
             Gui, Hide
             DllCall("SystemParametersInfo", "UInt", 0x57, "UInt", 0, "Ptr", 0, "UInt", 0)
@@ -420,61 +432,49 @@ DeactivateMouseSteering() {
 }
 
 ; === AHI Internal Core Dispatchers ===
+; Since subscriptions only occur if the function exists, 
+; these wrappers solely handle game-active focus checks.
+
 Core_ahiOnLButton(mId, start) {
-    if (AppState.IsGameActive && Func("ahiOnLButton"))
+    if (AppState.IsGameActive)
         Func("ahiOnLButton").Call(start)
     else
         ahi.SendMouseButtonEvent(mId, 0, start)
 }
 
 Core_ahiOnRButton(mId, start) {
-    if (AppState.IsGameActive && Func("ahiOnRButton"))
+    if (AppState.IsGameActive)
         Func("ahiOnRButton").Call(start)
     else
         ahi.SendMouseButtonEvent(mId, 1, start)
 }
 
 Core_ahiOnMButton(mId, start) {
-    if (AppState.IsGameActive && Func("ahiOnMButton"))
+    if (AppState.IsGameActive)
         Func("ahiOnMButton").Call(start)
     else
         ahi.SendMouseButtonEvent(mId, 2, start)
 }
 
 Core_ahiOnXButton1(mId, start) {
-    if (AppState.IsGameActive && Func("ahiOnXButton1"))
+    if (AppState.IsGameActive)
         Func("ahiOnXButton1").Call(start)
     else
         ahi.SendMouseButtonEvent(mId, 3, start)
 }
 
 Core_ahiOnXButton2(mId, start) {
-    if (AppState.IsGameActive && Func("ahiOnXButton2"))
+    if (AppState.IsGameActive)
         Func("ahiOnXButton2").Call(start)
     else
         ahi.SendMouseButtonEvent(mId, 4, start)
 }
 
 Core_ahiOnWheel(mId, direction) {
-    if (!AppState.IsGameActive) {
-        ahi.SendMouseButtonEvent(mId, 5, direction)
-        return
-    }
-    if (Func("ahiOnWheel")) {
+    if (AppState.IsGameActive)
         Func("ahiOnWheel").Call(direction)
-        return
-    }
-    if (direction == 1) {
-        if (Func("ahiOnWheelUp"))
-            Func("ahiOnWheelUp").Call()
-        else
-            ahi.SendMouseButtonEvent(mId, 1)
-    } else {
-        if (Func("ahiOnWheelDown"))
-            Func("ahiOnWheelDown").Call()
-        else
-            ahi.SendMouseButtonEvent(mId, -1)
-    }
+    else
+        ahi.SendMouseButtonEvent(mId, 5, direction)
 }
 
 ReadExternalGamepads() {
@@ -587,7 +587,7 @@ UpdateVirtualAxis(axis, isStick, ByRef dArray, ByRef aArray) {
 }
 
 FocusLost() {
-	Click, Middle Up ; fixes window focus
+    Click, Middle Up ; fixes window focus
     global lastAxisState, pad, SteerKey
     for axis in lastAxisState {
         if (lastAxisState[axis] != 0) {
@@ -619,8 +619,8 @@ CleanupMouseLockAndHide() {
 }
 
 CleanUp() {
-	DllCall("winmm\timeEndPeriod", "UInt", 1)
-	global ahi, EnableAHI
+    DllCall("winmm\timeEndPeriod", "UInt", 1)
+    global ahi, EnableAHI
 if (EnableAHI && IsObject(ahi))
     ahi.Dispose()
     DllCall("ClipCursor", "Ptr", 0)
@@ -665,6 +665,8 @@ ParseArray(iniStr) {
         arr.Push(Trim(A_LoopField))
     return arr
 }
+
+
 
 ; === Permanent Keybinds ===
 !t::
