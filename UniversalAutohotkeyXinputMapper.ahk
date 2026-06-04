@@ -94,8 +94,11 @@ if (ErrorLevel) {
     ExitApp
 }
 
-RegExMatch(FileContent, "s)\[CustomCode\]\R*(.*)", Match)
-CustomCode := Match1
+RegExMatch(FileContent, "s)\[CustomAutoexecute\]\R*(.*?)(?=\[|$)", MatchAuto)
+CustomAutoexecute := MatchAuto1
+
+RegExMatch(FileContent, "s)\[CustomSubroutine\]\R*(.*?)(?=\[|$)", MatchSub)
+CustomSubroutine := MatchSub1
 
 ; === Dynamic Script Compilation ===
 IniRead, EnableAHI, %settingsFile%, GlobalSettings, EnableAHI, 1
@@ -116,7 +119,7 @@ RegExMatch(selfCode, "s)\/\*\s*\[CORE_LOGIC_START\]\R(.*?)\R\[CORE_LOGIC_END\]\s
 CoreLogic := coreMatch1
 
 ; Combine strings directly into memory
-FullScriptString := IncludeDirectives . "`n" . CoreLogic . "`n`n; === CUSTOM CODE ===`n" . CustomCode . "`n`nreturn"
+FullScriptString := IncludeDirectives . "`n" . CustomAutoexecute . "`n" . CoreLogic . "`n`n; === CUSTOM CODE ===`n" . CustomSubroutine . "`n`nreturn"
 if (DebugMode) {
     ; Save the debug copy so you can open it to see why it crashed
     FileDelete, %A_ScriptDir%\$DEBUG_DUMP.ahk
@@ -209,6 +212,19 @@ IniRead, WootingEnabled, %settingsFile%, GlobalSettings, WootingEnabled, 1
 IniRead, ExternalXInputEnabled, %settingsFile%, GlobalSettings, ExternalXInputEnabled, 1
 IniRead, EnableAHI, %settingsFile%, GlobalSettings, EnableAHI, 1
 
+; --- AHI MOUSE TO JOYSTICK SETTINGS ---
+IniRead, AHITranslateMouseToAxes, %configFile%, Settings, AHITranslateMouseToAxes, 0
+IniRead, AHIMouseAxisX, %configFile%, Settings, AHIMouseAxisX, RX
+IniRead, AHIMouseAxisY, %configFile%, Settings, AHIMouseAxisY, RY
+IniRead, AHIMouseSensitivity, %configFile%, Settings, AHIMouseSensitivity, 15.0
+IniRead, AHIMouseInvertX, %configFile%, Settings, AHIMouseInvertX, 0
+IniRead, AHIMouseInvertY, %configFile%, Settings, AHIMouseInvertY, 1
+IniRead, AHIMouseDecay, %configFile%, Settings, AHIMouseDecay, 0.75
+
+Global AHIMouse := { DeltaX: 0, DeltaY: 0, StickX: 0, StickY: 0 }
+Global AHIMouseIDs := []
+Global AHIMouseSubscribed := false
+
 ; === Global State & Constants Object ===
 Global ScriptStartTime := A_TickCount
 Global lastChange := 0
@@ -268,6 +284,7 @@ if (EnableAHI) {
     for index, device in ahi.GetDeviceList() {
         if (device.isMouse) {
             mId := device.Id
+            AHIMouseIDs.Push(mId)
             
             if (Func("ahiOnLButton"))
                 ahi.SubscribeMouseButton(mId, 0, true, Func("Core_ahiOnLButton").Bind(mId))
@@ -389,9 +406,54 @@ CoreLoop:
     }
 
     if (AppState.IsGameActive) { 
+        ; --- DYNAMIC MOUSE SUBSCRIPTION ON FOCUS GAINED ---
+        if (AHITranslateMouseToAxes && !AHIMouseSubscribed) {
+            for _, mId in AHIMouseIDs {
+                ahi.SubscribeMouseMoveRelative(mId, true, Func("Core_ahiOnMouseMoveRelative"))
+            }
+            AHIMouseSubscribed := true
+        }
+
         ReadExternalGamepads()
         MouseGetPos, currentX, currentY
         MouseState.X := currentX, MouseState.Y := currentY
+; --- CALCULATE VIRTUAL STICK PHYSICS ---
+        if (AHITranslateMouseToAxes) {
+            ; Push the virtual stick based on mouse deltas
+            calcX := AHIMouseInvertX ? (AHIMouse.DeltaX * -1) : AHIMouse.DeltaX
+            
+            ; ViGEmBus Y is + for Up, but Windows Mouse Y is - for Up. Baseline is flipped.
+            calcY := AHIMouseInvertY ? AHIMouse.DeltaY : (AHIMouse.DeltaY * -1)
+            
+            AHIMouse.StickX += calcX * AHIMouseSensitivity
+            AHIMouse.StickY += calcY * AHIMouseSensitivity
+            
+            ; Consume raw deltas
+            AHIMouse.DeltaX := 0
+            AHIMouse.DeltaY := 0
+            
+            ; Clamp to XInput limits (-255 to 255)
+            AHIMouse.StickX := Max(-255, Min(255, AHIMouse.StickX))
+            AHIMouse.StickY := Max(-255, Min(255, AHIMouse.StickY))
+        }
+
+        UpdateVirtualAxis("LX", true, LX_D, LX_A)
+        UpdateVirtualAxis("LY", true, LY_D, LY_A)
+        UpdateVirtualAxis("RX", true, RX_D, RX_A)
+        UpdateVirtualAxis("RY", true, RY_D, RY_A)
+        UpdateVirtualAxis("LT", false, LT_D, LT_A)
+        UpdateVirtualAxis("RT", false, RT_D, RT_A)
+        
+        ; --- APPLY DECAY (SPRING RETURN TO CENTER) ---
+        if (AHITranslateMouseToAxes) {
+            AHIMouse.StickX *= AHIMouseDecay
+            AHIMouse.StickY *= AHIMouseDecay
+            ; Clean up micro-values to ensure a true resting zero
+            if (Abs(AHIMouse.StickX) < 1)
+                AHIMouse.StickX := 0
+            if (Abs(AHIMouse.StickY) < 1)
+                AHIMouse.StickY := 0
+        }
         
         if (EnableMouseLock) {
             DllCall(pGetClipCursor, "Ptr", &CurrentClip)
@@ -581,6 +643,14 @@ UpdateVirtualAxis(axis, isStick, ByRef dArray, ByRef aArray) {
                 extVal := rawExt
         }
         pressure += extVal
+; --- APPLY SMOOTHED MOUSE ---
+        global AHIMouse, AHITranslateMouseToAxes, AHIMouseAxisX, AHIMouseAxisY
+        if (AHITranslateMouseToAxes && isStick) {
+            if (axis == AHIMouseAxisX)
+                pressure += AHIMouse.StickX
+            else if (axis == AHIMouseAxisY)
+                pressure += AHIMouse.StickY
+        }
         
         if (isStick && MouseState.SteeringActive) {
             if (axis == MouseSteeringAxisX && (!AnalogSupersedesMouse || pressure == 0)) {
@@ -617,6 +687,20 @@ UpdateVirtualAxis(axis, isStick, ByRef dArray, ByRef aArray) {
 FocusLost() {
     Click, Middle Up 
     global lastAxisState, pad, SteerKey
+    global ahi, AHIMouseIDs, AHIMouseSubscribed, AHIMouse
+    
+; --- DYNAMIC MOUSE UNSUBSCRIPTION ON FOCUS LOST ---
+    if (AHIMouseSubscribed) {
+        for _, mId in AHIMouseIDs {
+            ahi.UnsubscribeMouseMoveRelative(mId)
+        }
+        AHIMouseSubscribed := false
+        AHIMouse.DeltaX := 0
+        AHIMouse.DeltaY := 0
+        AHIMouse.StickX := 0
+        AHIMouse.StickY := 0
+    }
+
     for axis in lastAxisState {
         if (lastAxisState[axis] != 0) {
             lastAxisState[axis] := 0
@@ -691,6 +775,14 @@ ParseArray(iniStr) {
     Loop, Parse, iniStr, `,
         arr.Push(Trim(A_LoopField))
     return arr
+}
+
+Core_ahiOnMouseMoveRelative(x, y) {
+    global AppState, AHIMouse
+    if (AppState.IsGameActive) {
+        AHIMouse.DeltaX += x
+        AHIMouse.DeltaY += y
+    }
 }
 
 ; === Permanent Keybinds ===
