@@ -214,12 +214,18 @@ IniRead, EnableAHI, %settingsFile%, GlobalSettings, EnableAHI, 1
 
 ; --- AHI MOUSE TO JOYSTICK SETTINGS ---
 IniRead, AHITranslateMouseToAxes, %configFile%, Settings, AHITranslateMouseToAxes, 0
-IniRead, AHIMouseAxisX, %configFile%, Settings, AHIMouseAxisX, RX
-IniRead, AHIMouseAxisY, %configFile%, Settings, AHIMouseAxisY, RY
+IniRead, raw_AHIMX, %configFile%, Settings, AHIMouseAxisX, RX
+IniRead, raw_AHIMY, %configFile%, Settings, AHIMouseAxisY, RY
 IniRead, AHIMouseSensitivity, %configFile%, Settings, AHIMouseSensitivity, 15.0
-IniRead, AHIMouseInvertX, %configFile%, Settings, AHIMouseInvertX, 0
-IniRead, AHIMouseInvertY, %configFile%, Settings, AHIMouseInvertY, 1
 IniRead, AHIMouseDecay, %configFile%, Settings, AHIMouseDecay, 0.75
+
+AHIMX_Parsed := ParseAxisAndMult(raw_AHIMX)
+Global AHIMouseAxisX := AHIMX_Parsed.Axis
+Global AHIMouseAxisX_Mult := AHIMX_Parsed.Mult
+
+AHIMY_Parsed := ParseAxisAndMult(raw_AHIMY)
+Global AHIMouseAxisY := AHIMY_Parsed.Axis
+Global AHIMouseAxisY_Mult := AHIMY_Parsed.Mult
 
 Global AHIMouse := { DeltaX: 0, DeltaY: 0, StickX: 0, StickY: 0 }
 Global AHIMouseIDs := []
@@ -312,8 +318,17 @@ if (WootingEnabled) {
 IniRead, val, %configFile%, Settings, exeName, ERROR
 Global exeName := (val != "ERROR") ? ParseArray(val) : []
 
-IniRead, MouseSteeringAxisX, %configFile%, Settings, MouseSteeringAxisX, LX
-IniRead, MouseSteeringAxisY, %configFile%, Settings, MouseSteeringAxisY, None
+IniRead, raw_MSAX, %configFile%, Settings, MouseSteeringAxisX, LX
+IniRead, raw_MSAY, %configFile%, Settings, MouseSteeringAxisY, None
+
+MSAX_Parsed := ParseAxisAndMult(raw_MSAX)
+Global MouseSteeringAxisX := MSAX_Parsed.Axis
+Global MouseSteeringAxisX_Mult := MSAX_Parsed.Mult
+
+MSAY_Parsed := ParseAxisAndMult(raw_MSAY)
+Global MouseSteeringAxisY := MSAY_Parsed.Axis
+Global MouseSteeringAxisY_Mult := MSAY_Parsed.Mult
+
 IniRead, MouseSteerWidth, %configFile%, Settings, MouseSteerWidth, 1.0
 IniRead, LX_D_MovesMouse, %configFile%, Settings, LX_D_MovesMouse, 0
 IniRead, AnalogSupersedesMouse, %configFile%, Settings, AnalogSupersedesMouse, 0
@@ -419,11 +434,11 @@ CoreLoop:
         MouseState.X := currentX, MouseState.Y := currentY
 ; --- CALCULATE VIRTUAL STICK PHYSICS ---
         if (AHITranslateMouseToAxes) {
-            ; Push the virtual stick based on mouse deltas
-            calcX := AHIMouseInvertX ? (AHIMouse.DeltaX * -1) : AHIMouse.DeltaX
+            ; Push the virtual stick based on mouse deltas and multipliers
+            calcX := AHIMouse.DeltaX * AHIMouseAxisX_Mult
             
             ; ViGEmBus Y is + for Up, but Windows Mouse Y is - for Up. Baseline is flipped.
-            calcY := AHIMouseInvertY ? AHIMouse.DeltaY : (AHIMouse.DeltaY * -1)
+            calcY := (AHIMouse.DeltaY * -1) * AHIMouseAxisY_Mult
             
             AHIMouse.StickX += calcX * AHIMouseSensitivity
             AHIMouse.StickY += calcY * AHIMouseSensitivity
@@ -603,6 +618,7 @@ UpdateVirtualAxis(axis, isStick, ByRef dArray, ByRef aArray) {
     global MathVars, ADZ_Calc, LX_D_MovesMouse, WootingDeadzone, ExtStickDeadzone, ExtTriggerDeadzone
     global AnalogSupersedesMouse, ExtPadState, WootingEnabled
     global MouseSteeringAxisX, MouseSteeringAxisY
+    global MouseSteeringAxisX_Mult, MouseSteeringAxisY_Mult
     
     pressure := 0, hasDigital := false
     
@@ -610,7 +626,8 @@ UpdateVirtualAxis(axis, isStick, ByRef dArray, ByRef aArray) {
         if GetKeyState(pair[1], "P") {
             pressure := pair[2]
             if (isStick && axis == MouseSteeringAxisX && LX_D_MovesMouse) {
-                targetX := Round(ScreenCenter.x + (pressure * MathVars.MaxDist_Div255))
+                signX := MouseSteeringAxisX_Mult < 0 ? -1 : 1
+                targetX := Round(ScreenCenter.x + (pressure * MathVars.MaxDist_Div255 * signX))
                 MouseMove, %targetX%, % MouseState.Y, 0
             }
             hasDigital := true
@@ -654,11 +671,11 @@ UpdateVirtualAxis(axis, isStick, ByRef dArray, ByRef aArray) {
         
         if (isStick && MouseState.SteeringActive) {
             if (axis == MouseSteeringAxisX && (!AnalogSupersedesMouse || pressure == 0)) {
-                mousePressure := (MouseState.X - ScreenCenter.x) * MathVars.MousePressureMult
+                mousePressure := (MouseState.X - ScreenCenter.x) * MathVars.MousePressureMult * MouseSteeringAxisX_Mult
                 pressure := AnalogSupersedesMouse ? mousePressure : (pressure + mousePressure)
             }
             else if (axis == MouseSteeringAxisY && (!AnalogSupersedesMouse || pressure == 0)) {
-                mousePressure := (ScreenCenter.y - MouseState.Y) * MathVars.MousePressureMult
+                mousePressure := (ScreenCenter.y - MouseState.Y) * MathVars.MousePressureMult * MouseSteeringAxisY_Mult
                 pressure := AnalogSupersedesMouse ? mousePressure : (pressure + mousePressure)
             }
         }
@@ -775,6 +792,13 @@ ParseArray(iniStr) {
     Loop, Parse, iniStr, `,
         arr.Push(Trim(A_LoopField))
     return arr
+}
+
+ParseAxisAndMult(iniStr) {
+    parts := StrSplit(iniStr, ",")
+    axis := Trim(parts[1])
+    mult := (parts.Length() > 1) ? Trim(parts[2]) + 0.0 : 1.0
+    return {Axis: axis, Mult: mult}
 }
 
 Core_ahiOnMouseMoveRelative(x, y) {
