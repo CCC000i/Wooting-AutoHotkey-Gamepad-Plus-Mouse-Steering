@@ -376,8 +376,8 @@ WinSet, TransColor, White
 Global CrosshairHwnd := WinExist()
 
 Gui, 2:+LastFound +AlwaysOnTop -Caption +ToolWindow +E0x20
-Gui, 2:Color, Red                  
-Gui, 2:Add, Progress, x1 y0 w1 h10000 BackgroundBlue 
+Gui, 2:Color, Red
+Gui, 2:Add, Progress, x1 y0 w1 h10000 BackgroundWhite
 WinSet, Transparent, 127          
 Global LineHwnd := WinExist()
 
@@ -432,22 +432,54 @@ CoreLoop:
         ReadExternalGamepads()
         MouseGetPos, currentX, currentY
         MouseState.X := currentX, MouseState.Y := currentY
+
+
 ; --- CALCULATE VIRTUAL STICK PHYSICS ---
         if (AHITranslateMouseToAxes) {
-            ; Push the virtual stick based on mouse deltas and multipliers
-            calcX := AHIMouse.DeltaX * AHIMouseAxisX_Mult
-            
-            ; ViGEmBus Y is + for Up, but Windows Mouse Y is - for Up. Baseline is flipped.
-            calcY := (AHIMouse.DeltaY * -1) * AHIMouseAxisY_Mult
-            
-            AHIMouse.StickX += calcX * AHIMouseSensitivity
-            AHIMouse.StickY += calcY * AHIMouseSensitivity
-            
-            ; Consume raw deltas
+            ; 1. Prevent Dropped Inputs (Race Condition Fix)
+            Critical, On
+            rawDeltaX := AHIMouse.DeltaX
+            rawDeltaY := AHIMouse.DeltaY
             AHIMouse.DeltaX := 0
             AHIMouse.DeltaY := 0
-            
-            ; Clamp to XInput limits (-255 to 255)
+            Critical, Off
+
+            ; 2. Calculate Time Delta (Frame-Rate Independence)
+            currentTick := A_TickCount
+            dt := currentTick - (AHIMouse.LastTick ? AHIMouse.LastTick : currentTick - 10)
+            AHIMouse.LastTick := currentTick
+            if (dt <= 0)
+                dt := 1
+
+            ; Normalize deltas against the expected 10ms loop
+            normFactor := 10.0 / dt
+            velX := rawDeltaX * normFactor * AHIMouseAxisX_Mult
+            velY := (rawDeltaY * -1) * normFactor * AHIMouseAxisY_Mult
+
+            ; 3. Velocity-Targeting 
+            ; (Multiplied by 3.0 to keep your existing AHIMouseSensitivity config values feeling similar)
+			; 1. Velocity-Targeting
+			targetX := velX * AHIMouseSensitivity * 3.0
+			targetY := velY * AHIMouseSensitivity * 3.0
+
+			; 2. Apply Decay (Weight/Return Speed)
+			; If movement exists, use high-speed tracking. 
+			; If no movement, decay toward zero based on AHIMouseDecay.
+			if (rawDeltaX != 0)
+				AHIMouse.StickX := targetX
+			else
+				AHIMouse.StickX *= AHIMouseDecay ; The true decay implementation
+
+			if (rawDeltaY != 0)
+				AHIMouse.StickY := targetY
+			else
+				AHIMouse.StickY *= AHIMouseDecay
+
+			; 3. Clamp
+			AHIMouse.StickX := Max(-255, Min(255, AHIMouse.StickX))
+			AHIMouse.StickY := Max(-255, Min(255, AHIMouse.StickY))
+
+            ; 5. Clamp to XInput limits
             AHIMouse.StickX := Max(-255, Min(255, AHIMouse.StickX))
             AHIMouse.StickY := Max(-255, Min(255, AHIMouse.StickY))
         }
@@ -461,12 +493,11 @@ CoreLoop:
         
         ; --- APPLY DECAY (SPRING RETURN TO CENTER) ---
         if (AHITranslateMouseToAxes) {
-            AHIMouse.StickX *= AHIMouseDecay
-            AHIMouse.StickY *= AHIMouseDecay
-            ; Clean up micro-values to ensure a true resting zero
-            if (Abs(AHIMouse.StickX) < 1)
+            ; The actual return-to-center is handled by the interpolation above.
+            ; This just snaps micro-values to absolute zero when the mouse has completely stopped.
+            if (rawDeltaX == 0 && Abs(AHIMouse.StickX) < 1.0)
                 AHIMouse.StickX := 0
-            if (Abs(AHIMouse.StickY) < 1)
+            if (rawDeltaY == 0 && Abs(AHIMouse.StickY) < 1.0)
                 AHIMouse.StickY := 0
         }
         
