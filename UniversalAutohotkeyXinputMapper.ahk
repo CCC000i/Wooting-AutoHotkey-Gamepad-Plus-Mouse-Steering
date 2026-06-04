@@ -385,7 +385,8 @@ AppState.IsGameActive := AppState.RunAlways ? true : WinActive("ahk_group Active
 if (AppState.IsGameActive)
     Gosub, WindowCheckLoop
 
-SetTimer, CoreLoop, 10
+Global CLTimer := 10
+SetTimer, CoreLoop, %CLTimer%
 SetTimer, WindowCheckLoop, 250
 return
 
@@ -466,7 +467,7 @@ ManageAHISubscriptions() {
 }
 
 UpdateAHIMousePhysics() {
-    global AHIMouse, AHIMouseAxisX_Mult, AHIMouseAxisY_Mult, AHIMouseSensitivity, AHIMouseDecay
+    global AHIMouse, AHIMouseAxisX_Mult, AHIMouseAxisY_Mult, AHIMouseSensitivity, AHIMouseDecay, CLTimer
     
     ; 1. Prevent Dropped Inputs (Race Condition Fix)
     Critical, On
@@ -478,13 +479,13 @@ UpdateAHIMousePhysics() {
 
     ; 2. Calculate Time Delta (Frame-Rate Independence)
     currentTick := A_TickCount
-    dt := currentTick - (AHIMouse.LastTick ? AHIMouse.LastTick : currentTick - 10)
+    dt := currentTick - (AHIMouse.LastTick ? AHIMouse.LastTick : currentTick - CLTimer)
     AHIMouse.LastTick := currentTick
     if (dt <= 0)
         dt := 1
 
-    ; Normalize deltas against the expected 10ms loop
-    normFactor := 10.0 / dt
+    ; Normalize deltas against the expected dynamic loop timer
+    normFactor := CLTimer / dt
     velX := rawDeltaX * normFactor * AHIMouseAxisX_Mult
     velY := (rawDeltaY * -1) * normFactor * AHIMouseAxisY_Mult
 
@@ -869,20 +870,20 @@ Core_ahiOnMouseMoveRelative(x, y) {
 
 ; === Tray Icon Labels ===
 Profile_Folder:
-	Run, %A_ScriptDir%\$MapperConfigs
+    Run, %A_ScriptDir%\$MapperConfigs
 Edit_Launcher:
-	Global launcherName
+    Global launcherName
     Run, edit "%A_ScriptDir%\%launcherName%"
-	return
+    return
 Reload_Launcher:
-	Run, "%A_AhkPath%" "%A_ScriptDir%\%launcherName%"
+    Run, "%A_AhkPath%" "%A_ScriptDir%\%launcherName%"
     ExitApp
 Reload_Launcher_with_Selection:
     FileDelete, %A_ScriptDir%\$MapperConfigs\.last_profile
     Run, "%A_AhkPath%" "%A_ScriptDir%\%launcherName%"
     ExitApp
 Exit_Script:
-	ExitApp
+    ExitApp
 
 [CORE_LOGIC_END]
 */
