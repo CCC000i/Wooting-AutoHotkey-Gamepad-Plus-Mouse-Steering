@@ -227,7 +227,7 @@ AHIMY_Parsed := ParseAxisAndMult(raw_AHIMY)
 Global AHIMouseAxisY := AHIMY_Parsed.Axis
 Global AHIMouseAxisY_Mult := AHIMY_Parsed.Mult
 
-Global AHIMouse := { DeltaX: 0, DeltaY: 0, StickX: 0, StickY: 0 }
+Global AHIMouse := { DeltaX: 0, DeltaY: 0, StickX: 0, StickY: 0, RawDeltaX: 0, RawDeltaY: 0 }
 Global AHIMouseIDs := []
 Global AHIMouseSubscribed := false
 
@@ -395,176 +395,192 @@ return
 
 WindowCheckLoop:
     AppState.IsGameActive := AppState.RunAlways ? true : WinActive("ahk_group ActiveGameGroup")
-    
-    if (AppState.IsGameActive && (EnableMouseLock || EnableVerticalLine)) {
-        if (AppState.RunAlways) {
-            nWx := 0, nWy := 0, nWw := A_ScreenWidth, nWh := A_ScreenHeight
-        } else {
-            WinGetPos, nWx, nWy, nWw, nWh, ahk_group ActiveGameGroup 
-        }
-
-        if (nWx != WindowState.X || nWy != WindowState.Y || nWw != WindowState.W || nWh != WindowState.H) {
-            WindowState.X := nWx, WindowState.Y := nWy, WindowState.W := nWw, WindowState.H := nWh
-            NumPut(nWx, Rect, 0, "Int"), NumPut(nWy, Rect, 4, "Int")
-            NumPut(nWx + nWw, Rect, 8, "Int"), NumPut(nWy + nWh, Rect, 12, "Int")
-            
-            if (EnableVerticalLine && Cursors.VertVisible)
-                Gui, 2:Show, % "x0 y0 w3 h" . nWh . " NoActivate", VertLine
-        }
-    }
+    if (AppState.IsGameActive && (EnableMouseLock || EnableVerticalLine))
+        UpdateActiveWindowBounds()
 return
-
 
 CoreLoop:
     if (!AppState.IsGameActive) {
         SteerKey.Down := false
+        if (AppState.FocusPass) {
+            FocusLost()
+            AppState.FocusPass := false
+        }
+        return
     }
 
-    if (AppState.IsGameActive) { 
-        ; --- DYNAMIC MOUSE SUBSCRIPTION ON FOCUS GAINED ---
-        if (AHITranslateMouseToAxes && !AHIMouseSubscribed) {
-            for _, mId in AHIMouseIDs {
-                ahi.SubscribeMouseMoveRelative(mId, true, Func("Core_ahiOnMouseMoveRelative"))
-            }
-            AHIMouseSubscribed := true
-        }
+    ; --- Game Is Active Execution Flow ---
+    AppState.FocusPass := true
 
-        ReadExternalGamepads()
-        MouseGetPos, currentX, currentY
-        MouseState.X := currentX, MouseState.Y := currentY
+    ManageAHISubscriptions()
+    ReadExternalGamepads()
+    
+    MouseGetPos, currentX, currentY
+    MouseState.X := currentX, MouseState.Y := currentY
 
+    if (AHITranslateMouseToAxes)
+        UpdateAHIMousePhysics()
 
-; --- CALCULATE VIRTUAL STICK PHYSICS ---
-        if (AHITranslateMouseToAxes) {
-            ; 1. Prevent Dropped Inputs (Race Condition Fix)
-            Critical, On
-            rawDeltaX := AHIMouse.DeltaX
-            rawDeltaY := AHIMouse.DeltaY
-            AHIMouse.DeltaX := 0
-            AHIMouse.DeltaY := 0
-            Critical, Off
+    UpdateAllVirtualAxes()
+    
+    if (AHITranslateMouseToAxes)
+        ApplyAHISpringReturn()
 
-            ; 2. Calculate Time Delta (Frame-Rate Independence)
-            currentTick := A_TickCount
-            dt := currentTick - (AHIMouse.LastTick ? AHIMouse.LastTick : currentTick - 10)
-            AHIMouse.LastTick := currentTick
-            if (dt <= 0)
-                dt := 1
+    EnforceMouseLockAndCursor()
 
-            ; Normalize deltas against the expected 10ms loop
-            normFactor := 10.0 / dt
-            velX := rawDeltaX * normFactor * AHIMouseAxisX_Mult
-            velY := (rawDeltaY * -1) * normFactor * AHIMouseAxisY_Mult
-
-            ; 3. Velocity-Targeting 
-            ; (Multiplied by 3.0 to keep your existing AHIMouseSensitivity config values feeling similar)
-			; 1. Velocity-Targeting
-			targetX := velX * AHIMouseSensitivity * 3.0
-			targetY := velY * AHIMouseSensitivity * 3.0
-
-			; 2. Apply Decay (Weight/Return Speed)
-			; If movement exists, use high-speed tracking. 
-			; If no movement, decay toward zero based on AHIMouseDecay.
-			if (rawDeltaX != 0)
-				AHIMouse.StickX := targetX
-			else
-				AHIMouse.StickX *= AHIMouseDecay ; The true decay implementation
-
-			if (rawDeltaY != 0)
-				AHIMouse.StickY := targetY
-			else
-				AHIMouse.StickY *= AHIMouseDecay
-
-			; 3. Clamp
-			AHIMouse.StickX := Max(-255, Min(255, AHIMouse.StickX))
-			AHIMouse.StickY := Max(-255, Min(255, AHIMouse.StickY))
-
-            ; 5. Clamp to XInput limits
-            AHIMouse.StickX := Max(-255, Min(255, AHIMouse.StickX))
-            AHIMouse.StickY := Max(-255, Min(255, AHIMouse.StickY))
-        }
-
-        UpdateVirtualAxis("LX", true, LX_D, LX_A)
-        UpdateVirtualAxis("LY", true, LY_D, LY_A)
-        UpdateVirtualAxis("RX", true, RX_D, RX_A)
-        UpdateVirtualAxis("RY", true, RY_D, RY_A)
-        UpdateVirtualAxis("LT", false, LT_D, LT_A)
-        UpdateVirtualAxis("RT", false, RT_D, RT_A)
-        
-        ; --- APPLY DECAY (SPRING RETURN TO CENTER) ---
-        if (AHITranslateMouseToAxes) {
-            ; The actual return-to-center is handled by the interpolation above.
-            ; This just snaps micro-values to absolute zero when the mouse has completely stopped.
-            if (rawDeltaX == 0 && Abs(AHIMouse.StickX) < 1.0)
-                AHIMouse.StickX := 0
-            if (rawDeltaY == 0 && Abs(AHIMouse.StickY) < 1.0)
-                AHIMouse.StickY := 0
-        }
-        
-        if (EnableMouseLock) {
-            DllCall(pGetClipCursor, "Ptr", &CurrentClip)
-            if (NumGet(CurrentClip, 0, "Int") != WindowState.X || NumGet(CurrentClip, 4, "Int") != WindowState.Y || NumGet(CurrentClip, 8, "Int") != WindowState.X + WindowState.W || NumGet(CurrentClip, 12, "Int") != WindowState.Y + WindowState.H) {
-                DllCall(pClipCursor, "Ptr", &Rect)
-                if (EnableCursorReplacement)
-                    Cursors.ForceHide := True 
-            }
-            WindowState.Locked := true
-        } else if (WindowState.Locked) {
-            DllCall(pClipCursor, "Ptr", 0)
-            WindowState.Locked := false
-        }
-
-        if (EnableCursorReplacement) {
-            if (!Cursors.Visible || Cursors.ForceHide || ++Cursors.EnforceCounter >= 50) {
-                if (!Cursors.Visible)
-                    Gui, Show, x0 y0 w16 h16 NoActivate, Crosshair
-                Cursors.Visible := True, Cursors.EnforceCounter := 0, Cursors.ForceHide := False
-                
-                For _, cursorID in SysCursorsList
-                    DllCall(pSetSystemCursor, "Ptr", DllCall(pCopyImage, "Ptr", BlankCursor, "UInt", 2, "Int", 0, "Int", 0, "UInt", 0), "UInt", cursorID)
-            }
-        } else if (Cursors.Visible) {
-            Gui, Hide
-            DllCall(pSystemParametersInfo, "UInt", 0x57, "UInt", 0, "Ptr", 0, "UInt", 0)
-            Cursors.Visible := False, Cursors.EnforceCounter := 0, Cursors.ForceHide := False
-        }
-
-        if (EnableVerticalLine) {
-            if (!Cursors.VertVisible)
-                Gui, 2:Show, % "x0 y0 w3 h" . WindowState.H . " NoActivate", VertLine
-            Cursors.VertVisible := true
-        } else if (Cursors.VertVisible) {
-            Gui, 2:Hide
-            Cursors.VertVisible := false
-        }
-
-        if (MouseState.X != MouseState.LastX || MouseState.Y != MouseState.LastY) {
-            if (EnableCursorReplacement && Cursors.Visible)
-                DllCall(pSetWindowPos, "Ptr", CrosshairHwnd, "Ptr", 0, "Int", MouseState.X-8, "Int", MouseState.Y-8, "Int", 0, "Int", 0, "UInt", 0x15)
-            if (EnableVerticalLine && Cursors.VertVisible)
-                DllCall(pSetWindowPos, "Ptr", LineHwnd, "Ptr", 0, "Int", MouseState.X, "Int", WindowState.Y, "Int", 0, "Int", 0, "UInt", 0x15)
-            MouseState.LastX := MouseState.X, MouseState.LastY := MouseState.Y
-        }
-
-        MouseState.SteeringActive := SteerKey.Down
-        AppState.FocusPass := true
-        
-        UpdateVirtualAxis("LX", true, LX_D, LX_A)
-        UpdateVirtualAxis("LY", true, LY_D, LY_A)
-        UpdateVirtualAxis("RX", true, RX_D, RX_A)
-        UpdateVirtualAxis("RY", true, RY_D, RY_A)
-        UpdateVirtualAxis("LT", false, LT_D, LT_A)
-        UpdateVirtualAxis("RT", false, RT_D, RT_A)
-        
-    } else if (AppState.FocusPass) {
-        FocusLost()
-        AppState.FocusPass := false
-    }
+    MouseState.SteeringActive := SteerKey.Down
 return
 
 ; ==========================================
 ;                    FUNCTIONS
 ; ==========================================
+
+UpdateActiveWindowBounds() {
+    global AppState, WindowState, Rect, EnableVerticalLine, Cursors
+    
+    if (AppState.RunAlways) {
+        nWx := 0, nWy := 0, nWw := A_ScreenWidth, nWh := A_ScreenHeight
+    } else {
+        WinGetPos, nWx, nWy, nWw, nWh, ahk_group ActiveGameGroup 
+    }
+
+    if (nWx != WindowState.X || nWy != WindowState.Y || nWw != WindowState.W || nWh != WindowState.H) {
+        WindowState.X := nWx, WindowState.Y := nWy, WindowState.W := nWw, WindowState.H := nWh
+        NumPut(nWx, Rect, 0, "Int"), NumPut(nWy, Rect, 4, "Int")
+        NumPut(nWx + nWw, Rect, 8, "Int"), NumPut(nWy + nWh, Rect, 12, "Int")
+        
+        if (EnableVerticalLine && Cursors.VertVisible)
+            Gui, 2:Show, % "x0 y0 w3 h" . nWh . " NoActivate", VertLine
+    }
+}
+
+ManageAHISubscriptions() {
+    global AHITranslateMouseToAxes, AHIMouseSubscribed, AHIMouseIDs, ahi
+    
+    if (AHITranslateMouseToAxes && !AHIMouseSubscribed) {
+        for _, mId in AHIMouseIDs {
+            ahi.SubscribeMouseMoveRelative(mId, true, Func("Core_ahiOnMouseMoveRelative"))
+        }
+        AHIMouseSubscribed := true
+    }
+}
+
+UpdateAHIMousePhysics() {
+    global AHIMouse, AHIMouseAxisX_Mult, AHIMouseAxisY_Mult, AHIMouseSensitivity, AHIMouseDecay
+    
+    ; 1. Prevent Dropped Inputs (Race Condition Fix)
+    Critical, On
+    rawDeltaX := AHIMouse.DeltaX
+    rawDeltaY := AHIMouse.DeltaY
+    AHIMouse.DeltaX := 0
+    AHIMouse.DeltaY := 0
+    Critical, Off
+
+    ; 2. Calculate Time Delta (Frame-Rate Independence)
+    currentTick := A_TickCount
+    dt := currentTick - (AHIMouse.LastTick ? AHIMouse.LastTick : currentTick - 10)
+    AHIMouse.LastTick := currentTick
+    if (dt <= 0)
+        dt := 1
+
+    ; Normalize deltas against the expected 10ms loop
+    normFactor := 10.0 / dt
+    velX := rawDeltaX * normFactor * AHIMouseAxisX_Mult
+    velY := (rawDeltaY * -1) * normFactor * AHIMouseAxisY_Mult
+
+    ; 3. Velocity-Targeting (Multiplied by 3.0 to keep existing config values similar)
+    targetX := velX * AHIMouseSensitivity * 3.0
+    targetY := velY * AHIMouseSensitivity * 3.0
+
+    ; 4. Apply Decay (Weight/Return Speed)
+    AHIMouse.StickX := (rawDeltaX != 0) ? targetX : AHIMouse.StickX * AHIMouseDecay
+    AHIMouse.StickY := (rawDeltaY != 0) ? targetY : AHIMouse.StickY * AHIMouseDecay
+
+    ; 5. Clamp to XInput limits
+    AHIMouse.StickX := Max(-255, Min(255, AHIMouse.StickX))
+    AHIMouse.StickY := Max(-255, Min(255, AHIMouse.StickY))
+    
+    ; Store state for Spring Return logic
+    AHIMouse.RawDeltaX := rawDeltaX
+    AHIMouse.RawDeltaY := rawDeltaY
+}
+
+UpdateAllVirtualAxes() {
+    global LX_D, LX_A, LY_D, LY_A, RX_D, RX_A, RY_D, RY_A, LT_D, LT_A, RT_D, RT_A
+    
+    UpdateVirtualAxis("LX", true, LX_D, LX_A)
+    UpdateVirtualAxis("LY", true, LY_D, LY_A)
+    UpdateVirtualAxis("RX", true, RX_D, RX_A)
+    UpdateVirtualAxis("RY", true, RY_D, RY_A)
+    UpdateVirtualAxis("LT", false, LT_D, LT_A)
+    UpdateVirtualAxis("RT", false, RT_D, RT_A)
+}
+
+ApplyAHISpringReturn() {
+    global AHIMouse
+    
+    if (AHIMouse.RawDeltaX == 0 && Abs(AHIMouse.StickX) < 1.0)
+        AHIMouse.StickX := 0
+    if (AHIMouse.RawDeltaY == 0 && Abs(AHIMouse.StickY) < 1.0)
+        AHIMouse.StickY := 0
+}
+
+EnforceMouseLockAndCursor() {
+    global EnableMouseLock, EnableCursorReplacement, EnableVerticalLine
+    global pGetClipCursor, pClipCursor, pSetSystemCursor, pCopyImage, pSetWindowPos, pSystemParametersInfo
+    global WindowState, CurrentClip, Rect, Cursors, BlankCursor, SysCursorsList
+    global MouseState, CrosshairHwnd, LineHwnd
+
+    ; --- Mouse Lock ---
+    if (EnableMouseLock) {
+        DllCall(pGetClipCursor, "Ptr", &CurrentClip)
+        if (NumGet(CurrentClip, 0, "Int") != WindowState.X || NumGet(CurrentClip, 4, "Int") != WindowState.Y || NumGet(CurrentClip, 8, "Int") != WindowState.X + WindowState.W || NumGet(CurrentClip, 12, "Int") != WindowState.Y + WindowState.H) {
+            DllCall(pClipCursor, "Ptr", &Rect)
+            if (EnableCursorReplacement)
+                Cursors.ForceHide := True 
+        }
+        WindowState.Locked := true
+    } else if (WindowState.Locked) {
+        DllCall(pClipCursor, "Ptr", 0)
+        WindowState.Locked := false
+    }
+
+    ; --- Cursor Replacement ---
+    if (EnableCursorReplacement) {
+        if (!Cursors.Visible || Cursors.ForceHide || ++Cursors.EnforceCounter >= 50) {
+            if (!Cursors.Visible)
+                Gui, Show, x0 y0 w16 h16 NoActivate, Crosshair
+            Cursors.Visible := True, Cursors.EnforceCounter := 0, Cursors.ForceHide := False
+            
+            For _, cursorID in SysCursorsList
+                DllCall(pSetSystemCursor, "Ptr", DllCall(pCopyImage, "Ptr", BlankCursor, "UInt", 2, "Int", 0, "Int", 0, "UInt", 0), "UInt", cursorID)
+        }
+    } else if (Cursors.Visible) {
+        Gui, Hide
+        DllCall(pSystemParametersInfo, "UInt", 0x57, "UInt", 0, "Ptr", 0, "UInt", 0)
+        Cursors.Visible := False, Cursors.EnforceCounter := 0, Cursors.ForceHide := False
+    }
+
+    ; --- Vertical Line ---
+    if (EnableVerticalLine) {
+        if (!Cursors.VertVisible)
+            Gui, 2:Show, % "x0 y0 w3 h" . WindowState.H . " NoActivate", VertLine
+        Cursors.VertVisible := true
+    } else if (Cursors.VertVisible) {
+        Gui, 2:Hide
+        Cursors.VertVisible := false
+    }
+
+    ; --- Sync GUI Elements to Mouse Position ---
+    if (MouseState.X != MouseState.LastX || MouseState.Y != MouseState.LastY) {
+        if (EnableCursorReplacement && Cursors.Visible)
+            DllCall(pSetWindowPos, "Ptr", CrosshairHwnd, "Ptr", 0, "Int", MouseState.X-8, "Int", MouseState.Y-8, "Int", 0, "Int", 0, "UInt", 0x15)
+        if (EnableVerticalLine && Cursors.VertVisible)
+            DllCall(pSetWindowPos, "Ptr", LineHwnd, "Ptr", 0, "Int", MouseState.X, "Int", WindowState.Y, "Int", 0, "Int", 0, "UInt", 0x15)
+        
+        MouseState.LastX := MouseState.X, MouseState.LastY := MouseState.Y
+    }
+}
 
 ActivateMouseSteering() {
     SteerKey.Down := true
@@ -691,7 +707,8 @@ UpdateVirtualAxis(axis, isStick, ByRef dArray, ByRef aArray) {
                 extVal := rawExt
         }
         pressure += extVal
-; --- APPLY SMOOTHED MOUSE ---
+        
+        ; --- APPLY SMOOTHED MOUSE ---
         global AHIMouse, AHITranslateMouseToAxes, AHIMouseAxisX, AHIMouseAxisY
         if (AHITranslateMouseToAxes && isStick) {
             if (axis == AHIMouseAxisX)
@@ -737,7 +754,7 @@ FocusLost() {
     global lastAxisState, pad, SteerKey
     global ahi, AHIMouseIDs, AHIMouseSubscribed, AHIMouse
     
-; --- DYNAMIC MOUSE UNSUBSCRIPTION ON FOCUS LOST ---
+    ; --- DYNAMIC MOUSE UNSUBSCRIPTION ON FOCUS LOST ---
     if (AHIMouseSubscribed) {
         for _, mId in AHIMouseIDs {
             ahi.UnsubscribeMouseMoveRelative(mId)
@@ -787,7 +804,6 @@ CleanUp() {
     DllCall(pSystemParametersInfo, "UInt", 0x57, "UInt", 0, "Ptr", 0, "UInt", 0)
     if (BlankCursor)
         DllCall(pDestroyCursor, "Ptr", BlankCursor)
-    ; Removed FileDelete targeting A_ScriptFullPath here since no disk file is written
 }
 
 ParseAnalog(iniStr) {
@@ -839,6 +855,7 @@ Core_ahiOnMouseMoveRelative(x, y) {
         AHIMouse.DeltaY += y
     }
 }
+
 
 ; === Permanent Keybinds ===
 !t::
