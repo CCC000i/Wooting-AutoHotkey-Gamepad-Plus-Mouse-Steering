@@ -287,23 +287,43 @@ if (ExternalXInputEnabled) {
 ; === Libraries & Device Initialization ===
 if (EnableAHI) {
     Global ahi := new AutoHotInterception()
+    
+    ; Define input groups to check for runtime user functions matching 'ahiSubscribed_KeyName'
+    MouseButtons := { "LButton": 0, "RButton": 1, "MButton": 2, "XButton1": 3, "XButton2": 4 }
+    KeysToScan := ["Space", "LAlt", "RAlt", "LCtrl", "RCtrl", "LShift", "RShift", "Enter", "Tab", "Esc"
+                , "Backspace", "Delete", "Up", "Down", "Left", "Right", "Home", "End", "PgUp", "PgDn"
+                , "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M"
+                , "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"
+                , "1", "2", "3", "4", "5", "6", "7", "8", "9", "0"
+                , "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12"]
+
     for index, device in ahi.GetDeviceList() {
         if (device.isMouse) {
             mId := device.Id
             AHIMouseIDs.Push(mId)
             
-            if (Func("ahiOnLButton"))
-                ahi.SubscribeMouseButton(mId, 0, true, Func("Core_ahiOnLButton").Bind(mId))
-            if (Func("ahiOnRButton"))
-                ahi.SubscribeMouseButton(mId, 1, true, Func("Core_ahiOnRButton").Bind(mId))
-            if (Func("ahiOnMButton"))
-                ahi.SubscribeMouseButton(mId, 2, true, Func("Core_ahiOnMButton").Bind(mId))
-            if (Func("ahiOnXButton1"))
-                ahi.SubscribeMouseButton(mId, 3, true, Func("Core_ahiOnXButton1").Bind(mId))
-            if (Func("ahiOnXButton2"))
-                ahi.SubscribeMouseButton(mId, 4, true, Func("Core_ahiOnXButton2").Bind(mId))
-            if (Func("ahiOnWheel"))
-                ahi.SubscribeMouseButton(mId, 5, true, Func("Core_ahiOnWheel").Bind(mId))
+            ; 1. Route Mouse Buttons
+            for btnName, btnId in MouseButtons {
+                if (Func("ahiSubscribed_" . btnName)) {
+                    ahi.SubscribeMouseButton(mId, btnId, true, Func("Core_DynamicMouseBtnHandler").Bind(btnName, btnId, mId))
+                }
+            }
+            
+            ; 2. Route Scroll Wheel
+            if (Func("ahiSubscribed_Wheel")) {
+                ahi.SubscribeMouseButton(mId, 5, true, Func("Core_DynamicMouseWheelHandler").Bind(mId))
+            }
+        } else {
+            kId := device.Id
+            ; 3. Route Keyboard Keys
+            for _, keyName in KeysToScan {
+                if (Func("ahiSubscribed_" . keyName)) {
+                    sc := GetKeySC(keyName)
+                    if (sc) {
+                        ahi.SubscribeKey(kId, sc, true, Func("Core_DynamicKeyHandler").Bind(keyName, sc, kId))
+                    }
+                }
+            }
         }
     }
 }
@@ -433,7 +453,7 @@ CoreLoop:
 return
 
 ; ==========================================
-;                    FUNCTIONS
+;                 FUNCTIONS
 ; ==========================================
 
 UpdateActiveWindowBounds() {
@@ -591,44 +611,28 @@ DeactivateMouseSteering() {
     SteerKey.Down := false
 }
 
-Core_ahiOnLButton(mId, start) {
+; === DYNAMIC INTERCEPTION HANDLERS ===
+
+Core_DynamicKeyHandler(keyName, sc, kId, state) {
+    global AppState, ahi
     if (AppState.IsGameActive)
-        Func("ahiOnLButton").Call(start)
+        Func("ahiSubscribed_" . keyName).Call(state)
     else
-        ahi.SendMouseButtonEvent(mId, 0, start)
+        ahi.SendKeyEvent(kId, sc, state)
 }
 
-Core_ahiOnRButton(mId, start) {
+Core_DynamicMouseBtnHandler(btnName, btnId, mId, state) {
+    global AppState, ahi
     if (AppState.IsGameActive)
-        Func("ahiOnRButton").Call(start)
+        Func("ahiSubscribed_" . btnName).Call(state)
     else
-        ahi.SendMouseButtonEvent(mId, 1, start)
+        ahi.SendMouseButtonEvent(mId, btnId, state)
 }
 
-Core_ahiOnMButton(mId, start) {
+Core_DynamicMouseWheelHandler(mId, direction) {
+    global AppState, ahi
     if (AppState.IsGameActive)
-        Func("ahiOnMButton").Call(start)
-    else
-        ahi.SendMouseButtonEvent(mId, 2, start)
-}
-
-Core_ahiOnXButton1(mId, start) {
-    if (AppState.IsGameActive)
-        Func("ahiOnXButton1").Call(start)
-    else
-        ahi.SendMouseButtonEvent(mId, 3, start)
-}
-
-Core_ahiOnXButton2(mId, start) {
-    if (AppState.IsGameActive)
-        Func("ahiOnXButton2").Call(start)
-    else
-        ahi.SendMouseButtonEvent(mId, 4, start)
-}
-
-Core_ahiOnWheel(mId, direction) {
-    if (AppState.IsGameActive)
-        Func("ahiOnWheel").Call(direction)
+        Func("ahiSubscribed_Wheel").Call(direction)
     else
         ahi.SendMouseButtonEvent(mId, 5, direction)
 }
@@ -857,7 +861,6 @@ Core_ahiOnMouseMoveRelative(x, y) {
     }
 }
 
-
 ; === Permanent Keybinds ===
 !t::
     Run, "%A_AhkPath%" "%A_ScriptDir%\%launcherName%"
@@ -871,8 +874,8 @@ Core_ahiOnMouseMoveRelative(x, y) {
 ; === Tray Icon Labels ===
 Profile_Folder:
     Run, %A_ScriptDir%\$MapperConfigs
+    return
 Edit_Launcher:
-    Global launcherName
     Run, edit "%A_ScriptDir%\%launcherName%"
     return
 Reload_Launcher:
@@ -884,6 +887,5 @@ Reload_Launcher_with_Selection:
     ExitApp
 Exit_Script:
     ExitApp
-
 [CORE_LOGIC_END]
 */
