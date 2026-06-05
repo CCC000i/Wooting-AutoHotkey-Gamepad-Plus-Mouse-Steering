@@ -1,12 +1,13 @@
 ; Requires ViGEmBus to be installed, + bundled scripts and DLLs in \Lib
 ; If Interception is not installed, set EnableAHI=0 in \$MapperConfigs\.Settings.ini
-Global DebugMode := true
-Global ScriptStartTime := A_TickCount
 
 #Requires AutoHotkey v1.1
 #NoEnv
 #SingleInstance Force
 SetBatchLines, -1
+
+Global DebugMode := true
+Global ScriptStartTime := A_TickCount
 
 ; --- Directory Setup & Global Settings Load ---
 settingsDir := A_ScriptDir . "\$MapperConfigs"
@@ -120,8 +121,9 @@ CoreLogic := coreMatch1
 
 ; Combine strings directly into memory
 FullScriptString := IncludeDirectives . "`n" . CustomAutoexecute . "`n" . CoreLogic . "`n`n; === CUSTOM CODE ===`n" . CustomSubroutine . "`n`nreturn"
+
 if (DebugMode) {
-    ; Save the debug copy so you can open it to see why it crashed
+    ; Save the debug copy to inspect crash sources
     FileDelete, %A_ScriptDir%\$DEBUG_DUMP.ahk
     FileAppend, %FullScriptString%, %A_ScriptDir%\$DEBUG_DUMP.ahk
 }
@@ -199,7 +201,6 @@ Menu, Tray, Add, Exit Script, Exit_Script
 ; Safety Hooks
 OnExit("CleanUp")
 OnMessage(0x11, "CleanUp") ; Catch logoffs/suspensions
-
 DllCall("winmm\timeBeginPeriod", "UInt", 1) 
 
 matchedConfig := A_Args[1]
@@ -220,20 +221,15 @@ IniRead, AHIMouseSensitivity, %configFile%, Settings, AHIMouseSensitivity, 15.0
 IniRead, AHIMouseDecay, %configFile%, Settings, AHIMouseDecay, 0.75
 
 AHIMX_Parsed := ParseAxisAndMult(raw_AHIMX)
-Global AHIMouseAxisX := AHIMX_Parsed.Axis
-Global AHIMouseAxisX_Mult := AHIMX_Parsed.Mult
-
 AHIMY_Parsed := ParseAxisAndMult(raw_AHIMY)
-Global AHIMouseAxisY := AHIMY_Parsed.Axis
-Global AHIMouseAxisY_Mult := AHIMY_Parsed.Mult
-
-Global AHIMouse := { DeltaX: 0, DeltaY: 0, StickX: 0, StickY: 0, RawDeltaX: 0, RawDeltaY: 0 }
-Global AHIMouseIDs := []
-Global AHIMouseSubscribed := false
 
 ; === Global State & Constants Object ===
-Global ScriptStartTime := A_TickCount
-Global lastChange := 0
+Global ScriptStartTime := A_TickCount, lastChange := 0, CLTimer := 10, hXInput := 0
+Global AHIMouseAxisX := AHIMX_Parsed.Axis, AHIMouseAxisX_Mult := AHIMX_Parsed.Mult
+Global AHIMouseAxisY := AHIMY_Parsed.Axis, AHIMouseAxisY_Mult := AHIMY_Parsed.Mult
+Global AHIMouse := { DeltaX: 0, DeltaY: 0, StickX: 0, StickY: 0, RawDeltaX: 0, RawDeltaY: 0, LastTick: A_TickCount }
+Global AHIMouseIDs := [], AHIMouseSubscribed := false
+
 Global CONST := { MULT_POS: 128.49803, MULT_NEG: 128.50196, READ_MULT: 0.00778198, DINPUT_MULT: 5.1 }
 Global AppState := { IsGameActive: false, RunAlways: false, FocusPass: true }
 Global WindowState := { Locked: false, X: 0, Y: 0, W: 0, H: 0 }
@@ -252,16 +248,15 @@ Global pSystemParametersInfo := DllCall("GetProcAddress", "Ptr", hUser32, "AStr"
 Global pDestroyCursor := DllCall("GetProcAddress", "Ptr", hUser32, "AStr", "DestroyCursor", "Ptr")
 
 Global MathVars := { MaxDist: 0, MousePressureMult: 0, WD_Mult: 1.0, ExtS_Mult: 1.0, ExtT_Mult: 1.0, MaxDist_Div255: 0 }
-Global ADZ_Calc := {}
-
+Global ADZ_Calc := {}, Linearity_Calc := {}
 Global SysCursorsList := [32512, 32513, 32514, 32515, 32516, 32642, 32643, 32644, 32645, 32646, 32648, 32649, 32650]
+Global lastAxisState := {LX: 0, LY: 0, RX: 0, RY: 0, LT: 0, RT: 0}
+
 VarSetCapacity(AndMask, 128, 0xFF)
 VarSetCapacity(XorMask, 128, 0x00)
 Global BlankCursor := DllCall("CreateCursor", "Ptr", 0, "Int", 0, "Int", 0, "Int", 32, "Int", 32, "Ptr", &AndMask, "Ptr", &XorMask, "Ptr")
 VarSetCapacity(Rect, 16, 0)
 VarSetCapacity(CurrentClip, 16, 0)
-
-Global lastAxisState := {LX: 0, LY: 0, RX: 0, RY: 0, LT: 0, RT: 0}
 
 ; === Pre-ViGEm External Controller Detection ===
 Global ExternalGamepads := []
@@ -275,9 +270,9 @@ if (ExternalXInputEnabled) {
     
     if (hXInput) {
         pXInputGetState := DllCall("GetProcAddress", "Ptr", hXInput, "AStr", "XInputGetState", "Ptr")
+        VarSetCapacity(XINPUT_STATE, 16, 0)
         Loop, 4 {
             idx := A_Index - 1
-            VarSetCapacity(XINPUT_STATE, 16, 0)
             if (DllCall(pXInputGetState, "UInt", idx, "Ptr", &XINPUT_STATE) == 0)
                 ExternalGamepads.Push({Type: "XInput", ID: idx})
         }
@@ -288,7 +283,7 @@ if (ExternalXInputEnabled) {
 if (EnableAHI) {
     Global ahi := new AutoHotInterception()
     
-    ; Define input groups to check for runtime user functions matching 'ahiSubscribed_KeyName'
+    ; Define input groups to check for runtime user functions matching 'ahiS_KeyName'
     MouseButtons := { "LButton": 0, "RButton": 1, "MButton": 2, "XButton1": 3, "XButton2": 4 }
     KeysToScan := ["Space", "LAlt", "RAlt", "LCtrl", "RCtrl", "LShift", "RShift", "Enter", "Tab", "Esc"
                 , "Backspace", "Delete", "Up", "Down", "Left", "Right", "Home", "End", "PgUp", "PgDn"
@@ -304,24 +299,22 @@ if (EnableAHI) {
             
             ; 1. Route Mouse Buttons
             for btnName, btnId in MouseButtons {
-                if (Func("ahiSubscribed_" . btnName)) {
+                if (Func("ahiS_" . btnName))
                     ahi.SubscribeMouseButton(mId, btnId, true, Func("Core_DynamicMouseBtnHandler").Bind(btnName, btnId, mId))
-                }
             }
             
             ; 2. Route Scroll Wheel
-            if (Func("ahiSubscribed_Wheel")) {
+            if (Func("ahiS_Wheel"))
                 ahi.SubscribeMouseButton(mId, 5, true, Func("Core_DynamicMouseWheelHandler").Bind(mId))
-            }
+                
         } else {
             kId := device.Id
             ; 3. Route Keyboard Keys
             for _, keyName in KeysToScan {
-                if (Func("ahiSubscribed_" . keyName)) {
+                if (Func("ahiS_" . keyName)) {
                     sc := GetKeySC(keyName)
-                    if (sc) {
+                    if (sc)
                         ahi.SubscribeKey(kId, sc, true, Func("Core_DynamicKeyHandler").Bind(keyName, sc, kId))
-                    }
                 }
             }
         }
@@ -342,12 +335,10 @@ IniRead, raw_MSAX, %configFile%, Settings, MouseSteeringAxisX, LX
 IniRead, raw_MSAY, %configFile%, Settings, MouseSteeringAxisY, None
 
 MSAX_Parsed := ParseAxisAndMult(raw_MSAX)
-Global MouseSteeringAxisX := MSAX_Parsed.Axis
-Global MouseSteeringAxisX_Mult := MSAX_Parsed.Mult
+Global MouseSteeringAxisX := MSAX_Parsed.Axis, MouseSteeringAxisX_Mult := MSAX_Parsed.Mult
 
 MSAY_Parsed := ParseAxisAndMult(raw_MSAY)
-Global MouseSteeringAxisY := MSAY_Parsed.Axis
-Global MouseSteeringAxisY_Mult := MSAY_Parsed.Mult
+Global MouseSteeringAxisY := MSAY_Parsed.Axis, MouseSteeringAxisY_Mult := MSAY_Parsed.Mult
 
 IniRead, MouseSteerWidth, %configFile%, Settings, MouseSteerWidth, 1.0
 IniRead, LX_D_MovesMouse, %configFile%, Settings, LX_D_MovesMouse, 0
@@ -371,6 +362,11 @@ MathVars.MaxDist_Div255 := MathVars.MaxDist / 255.0
 For _, ax in ["LX", "LY", "RX", "RY", "LT", "RT"] {
     IniRead, adzRaw, %configFile%, Settings, %ax%_Antideadzone, 0
     ADZ_Calc[ax] := { Raw: adzRaw * 2.55, Scale: (255 - (adzRaw * 2.55)) / 255.0 }
+    
+    IniRead, linRaw, %configFile%, Settings, %ax%_Linearity, 0.5
+    ; Clamp to prevent dividing by zero or hardmath errors at extreme values
+    linRaw := Max(0.0001, Min(0.9999, linRaw))
+    Linearity_Calc[ax] := (1.0 - linRaw) / linRaw
 }
 
 Global LX_A := ParseAnalog(ReadIni(configFile, "LX_A")), LX_D := ParseDigital(ReadIni(configFile, "LX_D", "DigitalBinds"))
@@ -401,11 +397,10 @@ Gui, 2:Add, Progress, x1 y0 w1 h10000 BackgroundWhite
 WinSet, Transparent, 127          
 Global LineHwnd := WinExist()
 
-AppState.IsGameActive := AppState.RunAlways ? true : WinActive("ahk_group ActiveGameGroup")
+AppState.IsGameActive := AppState.RunAlways || WinActive("ahk_group ActiveGameGroup")
 if (AppState.IsGameActive)
     Gosub, WindowCheckLoop
 
-Global CLTimer := 10
 SetTimer, CoreLoop, %CLTimer%
 SetTimer, WindowCheckLoop, 250
 return
@@ -415,7 +410,7 @@ return
 ; ==========================================
 
 WindowCheckLoop:
-    AppState.IsGameActive := AppState.RunAlways ? true : WinActive("ahk_group ActiveGameGroup")
+    AppState.IsGameActive := AppState.RunAlways || WinActive("ahk_group ActiveGameGroup")
     if (AppState.IsGameActive && (EnableMouseLock || EnableVerticalLine))
         UpdateActiveWindowBounds()
 return
@@ -499,7 +494,7 @@ UpdateAHIMousePhysics() {
 
     ; 2. Calculate Time Delta (Frame-Rate Independence)
     currentTick := A_TickCount
-    dt := currentTick - (AHIMouse.LastTick ? AHIMouse.LastTick : currentTick - CLTimer)
+    dt := currentTick - AHIMouse.LastTick
     AHIMouse.LastTick := currentTick
     if (dt <= 0)
         dt := 1
@@ -598,7 +593,7 @@ EnforceMouseLockAndCursor() {
             DllCall(pSetWindowPos, "Ptr", CrosshairHwnd, "Ptr", 0, "Int", MouseState.X-8, "Int", MouseState.Y-8, "Int", 0, "Int", 0, "UInt", 0x15)
         if (EnableVerticalLine && Cursors.VertVisible)
             DllCall(pSetWindowPos, "Ptr", LineHwnd, "Ptr", 0, "Int", MouseState.X, "Int", WindowState.Y, "Int", 0, "Int", 0, "UInt", 0x15)
-        
+         
         MouseState.LastX := MouseState.X, MouseState.LastY := MouseState.Y
     }
 }
@@ -616,7 +611,7 @@ DeactivateMouseSteering() {
 Core_DynamicKeyHandler(keyName, sc, kId, state) {
     global AppState, ahi
     if (AppState.IsGameActive)
-        Func("ahiSubscribed_" . keyName).Call(state)
+        Func("ahiS_" . keyName).Call(state)
     else
         ahi.SendKeyEvent(kId, sc, state)
 }
@@ -624,7 +619,7 @@ Core_DynamicKeyHandler(keyName, sc, kId, state) {
 Core_DynamicMouseBtnHandler(btnName, btnId, mId, state) {
     global AppState, ahi
     if (AppState.IsGameActive)
-        Func("ahiSubscribed_" . btnName).Call(state)
+        Func("ahiS_" . btnName).Call(state)
     else
         ahi.SendMouseButtonEvent(mId, btnId, state)
 }
@@ -632,7 +627,7 @@ Core_DynamicMouseBtnHandler(btnName, btnId, mId, state) {
 Core_DynamicMouseWheelHandler(mId, direction) {
     global AppState, ahi
     if (AppState.IsGameActive)
-        Func("ahiSubscribed_Wheel").Call(direction)
+        Func("ahiS_Wheel").Call(direction)
     else
         ahi.SendMouseButtonEvent(mId, 5, direction)
 }
@@ -667,7 +662,7 @@ ReadIni(file, key, section := "AnalogBinds") {
 
 UpdateVirtualAxis(axis, isStick, ByRef dArray, ByRef aArray) {
     global lastAxisState, ScreenCenter, MouseState, CONST
-    global MathVars, ADZ_Calc, LX_D_MovesMouse, WootingDeadzone, ExtStickDeadzone, ExtTriggerDeadzone
+    global MathVars, ADZ_Calc, Linearity_Calc, LX_D_MovesMouse, WootingDeadzone, ExtStickDeadzone, ExtTriggerDeadzone
     global AnalogSupersedesMouse, ExtPadState, WootingEnabled
     global MouseSteeringAxisX, MouseSteeringAxisY
     global MouseSteeringAxisX_Mult, MouseSteeringAxisY_Mult
@@ -736,6 +731,13 @@ UpdateVirtualAxis(axis, isStick, ByRef dArray, ByRef aArray) {
     
     pressure := isStick ? Max(-255, Min(255, pressure)) : Max(0, Min(255, pressure))
     
+    ; --- APPLY LINEARITY CURVE ---
+    if (Linearity_Calc[axis] != 1.0 && pressure != 0) {
+        pSign := (pressure < 0) ? -1 : 1
+        pNorm := Abs(pressure) / 255.0
+        pressure := (pNorm ** Linearity_Calc[axis]) * 255.0 * pSign
+    }
+    
     if (ADZ_Calc[axis].Raw > 0 && pressure != 0) {
         calc_raw := ADZ_Calc[axis].Raw
         calc_scale := ADZ_Calc[axis].Scale
@@ -802,13 +804,15 @@ CleanupMouseLockAndHide() {
 
 CleanUp() {
     DllCall("winmm\timeEndPeriod", "UInt", 1)
-    global ahi, EnableAHI, pClipCursor, pSystemParametersInfo, pDestroyCursor, BlankCursor
+    global ahi, EnableAHI, pClipCursor, pSystemParametersInfo, pDestroyCursor, BlankCursor, hXInput
     if (EnableAHI && IsObject(ahi))
         ahi.Dispose()
     DllCall(pClipCursor, "Ptr", 0)
     DllCall(pSystemParametersInfo, "UInt", 0x57, "UInt", 0, "Ptr", 0, "UInt", 0)
     if (BlankCursor)
         DllCall(pDestroyCursor, "Ptr", BlankCursor)
+    if (hXInput)
+        DllCall("FreeLibrary", "Ptr", hXInput)
 }
 
 ParseAnalog(iniStr) {
