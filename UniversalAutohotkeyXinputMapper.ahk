@@ -306,6 +306,9 @@ if (EnableAHI) {
             ; 2. Route Scroll Wheel
             if (Func("ahiS_Wheel"))
                 ahi.SubscribeMouseButton(mId, 5, true, Func("Core_DynamicMouseWheelHandler").Bind(mId))
+			; 2.1 Route Horizontal Scroll Wheel
+            if (Func("ahiS_HWheel"))
+                ahi.SubscribeMouseButton(mId, 6, true, Func("Core_DynamicMouseHWheelHandler").Bind(mId))
                 
         } else {
             kId := device.Id
@@ -630,6 +633,14 @@ Core_DynamicMouseWheelHandler(mId, direction) {
         Func("ahiS_Wheel").Call(direction)
     else
         ahi.SendMouseButtonEvent(mId, 5, direction)
+}
+
+Core_DynamicMouseHWheelHandler(mId, direction) {
+    global AppState, ahi
+    if (AppState.IsGameActive)
+        Func("ahiS_Wheel").Call(direction)
+    else
+        ahi.SendMouseButtonEvent(mId, 6, direction)
 }
 
 ReadExternalGamepads() {
