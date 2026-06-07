@@ -527,12 +527,121 @@ UpdateAHIMousePhysics() {
 UpdateAllVirtualAxes() {
     global LX_D, LX_A, LY_D, LY_A, RX_D, RX_A, RY_D, RY_A, LT_D, LT_A, RT_D, RT_A
     
-    UpdateVirtualAxis("LX", true, LX_D, LX_A)
-    UpdateVirtualAxis("LY", true, LY_D, LY_A)
-    UpdateVirtualAxis("RX", true, RX_D, RX_A)
-    UpdateVirtualAxis("RY", true, RY_D, RY_A)
-    UpdateVirtualAxis("LT", false, LT_D, LT_A)
-    UpdateVirtualAxis("RT", false, RT_D, RT_A)
+    lx := CalcVirtualPressure("LX", true, LX_D, LX_A), ly := CalcVirtualPressure("LY", true, LY_D, LY_A)
+    rx := CalcVirtualPressure("RX", true, RX_D, RX_A), ry := CalcVirtualPressure("RY", true, RY_D, RY_A)
+    lt := CalcVirtualPressure("LT", false, LT_D, LT_A), rt := CalcVirtualPressure("RT", false, RT_D, RT_A)
+    
+    NormalizeStick(lx, ly)
+    NormalizeStick(rx, ry)
+    
+    CommitVirtualPressure("LX", true, lx), CommitVirtualPressure("LY", true, ly)
+    CommitVirtualPressure("RX", true, rx), CommitVirtualPressure("RY", true, ry)
+    CommitVirtualPressure("LT", false, lt), CommitVirtualPressure("RT", false, rt)
+}
+
+NormalizeStick(ByRef x, ByRef y) {
+    mag := Sqrt((x ** 2) + (y ** 2))
+    if (mag > 255) {
+        x := (x / mag) * 255.0
+        y := (y / mag) * 255.0
+    }
+}
+
+CalcVirtualPressure(axis, isStick, ByRef dArray, ByRef aArray) {
+    global ScreenCenter, MouseState, MathVars, LX_D_MovesMouse, WootingDeadzone, ExtStickDeadzone, ExtTriggerDeadzone
+    global AnalogSupersedesMouse, ExtPadState, WootingEnabled, MouseSteeringAxisX, MouseSteeringAxisY
+    global MouseSteeringAxisX_Mult, MouseSteeringAxisY_Mult, AHIMouse, AHITranslateMouseToAxes, AHIMouseAxisX, AHIMouseAxisY
+    
+    pressure := 0, hasDigital := false
+    
+    for _, pair in dArray {
+        if GetKeyState(pair[1], "P") {
+            pressure := pair[2]
+            if (isStick && axis == MouseSteeringAxisX && LX_D_MovesMouse) {
+                signX := MouseSteeringAxisX_Mult < 0 ? -1 : 1
+                targetX := Round(ScreenCenter.x + (pressure * MathVars.MaxDist_Div255 * signX))
+                MouseMove, %targetX%, % MouseState.Y, 0
+            }
+            hasDigital := true
+            break
+        }
+    }
+    
+    if (!hasDigital) {
+        for key, value in aArray {
+            rawVal := 0
+            if (WootingEnabled)
+                rawVal := sw.RP(key)
+            if (WootingDeadzone > 0)
+                rawVal := (rawVal <= WootingDeadzone) ? 0 : (rawVal - WootingDeadzone) * MathVars.WD_Mult
+            pressure += rawVal * value
+        }
+        
+        extVal := 0
+        rawExt := ExtPadState[axis]
+        
+        if (isStick) {
+            absExt := Abs(rawExt)
+            if (ExtStickDeadzone > 0)
+                absExt := (absExt <= ExtStickDeadzone) ? 0 : (absExt - ExtStickDeadzone) * MathVars.ExtS_Mult
+            extVal := (rawExt < 0) ? -absExt : absExt
+        } else {
+            if (ExtTriggerDeadzone > 0)
+                extVal := (rawExt <= ExtTriggerDeadzone) ? 0 : (rawExt - ExtTriggerDeadzone) * MathVars.ExtT_Mult
+            else
+                extVal := rawExt
+        }
+        pressure += extVal
+        
+        if (AHITranslateMouseToAxes && isStick) {
+            if (axis == AHIMouseAxisX)
+                pressure += AHIMouse.StickX
+            else if (axis == AHIMouseAxisY)
+                pressure += AHIMouse.StickY
+        }
+        
+        if (isStick && MouseState.SteeringActive) {
+            if (axis == MouseSteeringAxisX && (!AnalogSupersedesMouse || pressure == 0)) {
+                mousePressure := (MouseState.X - ScreenCenter.x) * MathVars.MousePressureMult * MouseSteeringAxisX_Mult
+                pressure := AnalogSupersedesMouse ? mousePressure : (pressure + mousePressure)
+            }
+            else if (axis == MouseSteeringAxisY && (!AnalogSupersedesMouse || pressure == 0)) {
+                mousePressure := (ScreenCenter.y - MouseState.Y) * MathVars.MousePressureMult * MouseSteeringAxisY_Mult
+                pressure := AnalogSupersedesMouse ? mousePressure : (pressure + mousePressure)
+            }
+        }
+    }
+    
+    return pressure
+}
+
+CommitVirtualPressure(axis, isStick, pressure) {
+    global lastAxisState, CONST, ADZ_Calc, Linearity_Calc, pad
+    
+    pressure := isStick ? Max(-255, Min(255, pressure)) : Max(0, Min(255, pressure))
+    
+    if (Linearity_Calc[axis] != 1.0 && pressure != 0) {
+        pSign := (pressure < 0) ? -1 : 1
+        pNorm := Abs(pressure) / 255.0
+        pressure := (pNorm ** Linearity_Calc[axis]) * 255.0 * pSign
+    }
+    
+    if (ADZ_Calc[axis].Raw > 0 && pressure != 0) {
+        calc_raw := ADZ_Calc[axis].Raw
+        calc_scale := ADZ_Calc[axis].Scale
+        
+        if (isStick)
+            pressure := (pressure > 0) ? calc_raw + (pressure * calc_scale) : -calc_raw + (pressure * calc_scale)
+        else if (pressure > 0)
+            pressure := calc_raw + (pressure * calc_scale)
+    }
+    
+    finalVal := isStick ? Round(pressure * (pressure < 0 ? CONST.MULT_NEG : CONST.MULT_POS)) : Round(pressure)
+    
+    if (finalVal != lastAxisState[axis]) {
+        lastAxisState[axis] := finalVal
+        pad.Axes[axis].SetState(finalVal)
+    }
 }
 
 ApplyAHISpringReturn() {
