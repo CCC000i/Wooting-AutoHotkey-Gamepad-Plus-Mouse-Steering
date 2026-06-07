@@ -536,50 +536,107 @@ UpdateAllVirtualAxes() {
     rx := CalcVirtualPressure("RX", true, RX_D, RX_A), ry := CalcVirtualPressure("RY", true, RY_D, RY_A)
     lt := CalcVirtualPressure("LT", false, LT_D, LT_A), rt := CalcVirtualPressure("RT", false, RT_D, RT_A)
     
-    ; Apply radial deadzone, linearity, and circular clamping BEFORE committing
-    ApplyRadialStick(lx, ly, "LX")
-    ApplyRadialStick(rx, ry, "RX")
+    ; Apply radial physics, mouse steering, and passthrough BEFORE committing
+    ApplyRadialStick(lx, ly, "LX", "LY")
+    ApplyRadialStick(rx, ry, "RX", "RY")
     
     CommitVirtualPressure("LX", true, lx), CommitVirtualPressure("LY", true, ly)
     CommitVirtualPressure("RX", true, rx), CommitVirtualPressure("RY", true, ry)
     CommitVirtualPressure("LT", false, lt), CommitVirtualPressure("RT", false, rt)
 }
 
-ApplyRadialStick(ByRef x, ByRef y, axisX) {
-    global ADZ_Calc, Linearity_Calc
+ApplyRadialStick(ByRef x, ByRef y, axisX, axisY) {
+    global ADZ_Calc, Linearity_Calc, ExtPadState, ExtStickDeadzone, MathVars
+    global MouseState, ScreenCenter, MouseSteeringAxisX, MouseSteeringAxisY
+    global MouseSteeringAxisX_Mult, MouseSteeringAxisY_Mult, AnalogSupersedesMouse
+
+    ; --- 1. Radial External XInput Passthrough ---
+    extX := ExtPadState[axisX]
+    extY := ExtPadState[axisY]
+    extMag := Sqrt((extX ** 2) + (extY ** 2))
     
+    if (extMag > ExtStickDeadzone && extMag > 0) {
+        ; Clamp external pad magnitude to 255 to prevent square-gate controllers from overpowering keys
+        clampedExtMag := (extMag > 255) ? 255 : extMag
+        extNorm := (clampedExtMag - ExtStickDeadzone) * MathVars.ExtS_Mult
+        x += (extX / extMag) * extNorm
+        y += (extY / extMag) * extNorm
+    }
+
+    ; --- 2. Box-Bound Mouse Steering ---
+    if (MouseState.SteeringActive) {
+        isMouseX := (axisX == MouseSteeringAxisX)
+        isMouseY := (axisY == MouseSteeringAxisY)
+        
+        mouseXPress := 0
+        mouseYPress := 0
+        
+        ; Evaluate X screen distance and hard clamp to MaxDist
+        if (isMouseX) {
+            distX := MouseState.X - ScreenCenter.x
+            absDistX := Abs(distX)
+            if (absDistX > MathVars.MaxDist)
+                absDistX := MathVars.MaxDist
+            
+            if (absDistX > MathVars.MS_DeadzonePixels) {
+                signX := (distX < 0) ? -1 : 1
+                mouseXPress := (absDistX - MathVars.MS_DeadzonePixels) * MathVars.MousePressureMult * MouseSteeringAxisX_Mult * signX
+            }
+        }
+        
+        ; Evaluate Y screen distance and hard clamp to MaxDist
+        if (isMouseY) {
+            distY := ScreenCenter.y - MouseState.Y
+            absDistY := Abs(distY)
+            if (absDistY > MathVars.MaxDist)
+                absDistY := MathVars.MaxDist
+            
+            if (absDistY > MathVars.MS_DeadzonePixels) {
+                signY := (distY < 0) ? -1 : 1
+                mouseYPress := (absDistY - MathVars.MS_DeadzonePixels) * MathVars.MousePressureMult * MouseSteeringAxisY_Mult * signY
+            }
+        }
+        
+        ; Apply logic ensuring analog/digital supersedes mouse if specified
+        if (AnalogSupersedesMouse) {
+            if (x == 0 && isMouseX)
+                x := mouseXPress
+            if (y == 0 && isMouseY)
+                y := mouseYPress
+        } else {
+            x += mouseXPress
+            y += mouseYPress
+        }
+    }
+
+    ; --- 3. Radial Output Normalization & Curves ---
     mag := Sqrt((x ** 2) + (y ** 2))
     if (mag == 0)
         return
     
-    ; Normalize to 0.0 - 1.0 (assuming 255 is a fully held stick)
     normMag := mag / 255.0
     if (normMag > 1.0)
         normMag := 1.0
     
-    ; Read the curve values using the X axis (assuming symmetric XY settings)
     lin := Linearity_Calc[axisX]
     adz_raw := ADZ_Calc[axisX].Raw
     adz_scale := ADZ_Calc[axisX].Scale
     
-    ; Apply Linearity radially
     if (lin != 1.0)
         normMag := normMag ** lin
     
-    ; Apply Anti-Deadzone radially
     if (adz_raw > 0)
         normMag := (adz_raw / 255.0) + (normMag * adz_scale)
     
-    ; Scale the X and Y components back proportionally
     newMag := normMag * 255.0
     x := Round((x / mag) * newMag)
     y := Round((y / mag) * newMag)
 }
 
 CalcVirtualPressure(axis, isStick, ByRef dArray, ByRef aArray) {
-    global ScreenCenter, MouseState, MathVars, LX_D_MovesMouse, WootingDeadzone, ExtStickDeadzone, ExtTriggerDeadzone
-    global AnalogSupersedesMouse, ExtPadState, WootingEnabled, MouseSteeringAxisX, MouseSteeringAxisY
-    global MouseSteeringAxisX_Mult, MouseSteeringAxisY_Mult, AHIMouse, AHITranslateMouseToAxes, AHIMouseAxisX, AHIMouseAxisY
+    global ScreenCenter, MouseState, MathVars, LX_D_MovesMouse, WootingDeadzone, ExtTriggerDeadzone
+    global ExtPadState, WootingEnabled, MouseSteeringAxisX
+    global MouseSteeringAxisX_Mult, AHIMouse, AHITranslateMouseToAxes, AHIMouseAxisX, AHIMouseAxisY
     
     pressure := 0, hasDigital := false
     
@@ -606,50 +663,21 @@ CalcVirtualPressure(axis, isStick, ByRef dArray, ByRef aArray) {
             pressure += rawVal * value
         }
         
-        extVal := 0
-        rawExt := ExtPadState[axis]
-        
-        if (isStick) {
-            absExt := Abs(rawExt)
-            if (ExtStickDeadzone > 0)
-                absExt := (absExt <= ExtStickDeadzone) ? 0 : (absExt - ExtStickDeadzone) * MathVars.ExtS_Mult
-            extVal := (rawExt < 0) ? -absExt : absExt
-        } else {
+        ; Triggers continue using standard 1D External Passthrough 
+        if (!isStick) {
+            rawExt := ExtPadState[axis]
             if (ExtTriggerDeadzone > 0)
-                extVal := (rawExt <= ExtTriggerDeadzone) ? 0 : (rawExt - ExtTriggerDeadzone) * MathVars.ExtT_Mult
+                pressure += (rawExt <= ExtTriggerDeadzone) ? 0 : (rawExt - ExtTriggerDeadzone) * MathVars.ExtT_Mult
             else
-                extVal := rawExt
+                pressure += rawExt
         }
-        pressure += extVal
         
+        ; AHI Relative Translation
         if (AHITranslateMouseToAxes && isStick) {
             if (axis == AHIMouseAxisX)
                 pressure += AHIMouse.StickX
             else if (axis == AHIMouseAxisY)
                 pressure += AHIMouse.StickY
-        }
-        
-        if (isStick && MouseState.SteeringActive) {
-            if (axis == MouseSteeringAxisX && (!AnalogSupersedesMouse || pressure == 0)) {
-                distX := MouseState.X - ScreenCenter.x
-                absDistX := Abs(distX)
-                
-                if (absDistX > MathVars.MS_DeadzonePixels) {
-                    signX := (distX < 0) ? -1 : 1
-                    mousePressure := (absDistX - MathVars.MS_DeadzonePixels) * MathVars.MousePressureMult * MouseSteeringAxisX_Mult * signX
-                    pressure := AnalogSupersedesMouse ? mousePressure : (pressure + mousePressure)
-                }
-            }
-            else if (axis == MouseSteeringAxisY && (!AnalogSupersedesMouse || pressure == 0)) {
-                distY := ScreenCenter.y - MouseState.Y
-                absDistY := Abs(distY)
-                
-                if (absDistY > MathVars.MS_DeadzonePixels) {
-                    signY := (distY < 0) ? -1 : 1
-                    mousePressure := (absDistY - MathVars.MS_DeadzonePixels) * MathVars.MousePressureMult * MouseSteeringAxisY_Mult * signY
-                    pressure := AnalogSupersedesMouse ? mousePressure : (pressure + mousePressure)
-                }
-            }
         }
     }
     
