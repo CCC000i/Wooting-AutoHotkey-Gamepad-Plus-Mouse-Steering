@@ -238,6 +238,7 @@ Global Cursors := { Visible: false, ForceHide: false, EnforceCounter: 0, VertVis
 Global SteerKey := { Down: false }
 Global ScreenCenter := { x: A_ScreenWidth // 2, y: A_ScreenHeight // 2 }
 
+; Cache Win32 API calls
 Global hUser32 := DllCall("GetModuleHandle", "Str", "user32.dll", "Ptr")
 Global pGetClipCursor := DllCall("GetProcAddress", "Ptr", hUser32, "AStr", "GetClipCursor", "Ptr")
 Global pClipCursor := DllCall("GetProcAddress", "Ptr", hUser32, "AStr", "ClipCursor", "Ptr")
@@ -247,7 +248,7 @@ Global pSetWindowPos := DllCall("GetProcAddress", "Ptr", hUser32, "AStr", "SetWi
 Global pSystemParametersInfo := DllCall("GetProcAddress", "Ptr", hUser32, "AStr", "SystemParametersInfoW", "Ptr")
 Global pDestroyCursor := DllCall("GetProcAddress", "Ptr", hUser32, "AStr", "DestroyCursor", "Ptr")
 
-Global MathVars := { MaxDist: 0, MousePressureMult: 0, WD_Mult: 1.0, ExtS_Mult: 1.0, ExtT_Mult: 1.0, MaxDist_Div255: 0 }
+Global MathVars := { MaxDist: 0, MousePressureMult: 0, WD_Mult: 1.0, ExtS_Mult: 1.0, ExtT_Mult: 1.0, MaxDist_Div255: 0, MS_DeadzonePixels: 0 }
 Global ADZ_Calc := {}, Linearity_Calc := {}
 Global SysCursorsList := [32512, 32513, 32514, 32515, 32516, 32642, 32643, 32644, 32645, 32646, 32648, 32649, 32650]
 Global lastAxisState := {LX: 0, LY: 0, RX: 0, RY: 0, LT: 0, RT: 0}
@@ -297,22 +298,23 @@ if (EnableAHI) {
             mId := device.Id
             AHIMouseIDs.Push(mId)
             
-            ; 1. Route Mouse Buttons
+            ; Route Mouse Buttons
             for btnName, btnId in MouseButtons {
                 if (Func("ahiS_" . btnName))
                     ahi.SubscribeMouseButton(mId, btnId, true, Func("Core_DynamicMouseBtnHandler").Bind(btnName, btnId, mId))
             }
             
-            ; 2. Route Scroll Wheel
+            ; Route Scroll Wheel
             if (Func("ahiS_Wheel"))
                 ahi.SubscribeMouseButton(mId, 5, true, Func("Core_DynamicMouseWheelHandler").Bind(mId))
-			; 2.1 Route Horizontal Scroll Wheel
+            
+            ; Route Horizontal Scroll Wheel
             if (Func("ahiS_HWheel"))
                 ahi.SubscribeMouseButton(mId, 6, true, Func("Core_DynamicMouseHWheelHandler").Bind(mId))
                 
         } else {
             kId := device.Id
-            ; 3. Route Keyboard Keys
+            ; Route Keyboard Keys
             for _, keyName in KeysToScan {
                 if (Func("ahiS_" . keyName)) {
                     sc := GetKeySC(keyName)
@@ -344,6 +346,7 @@ MSAY_Parsed := ParseAxisAndMult(raw_MSAY)
 Global MouseSteeringAxisY := MSAY_Parsed.Axis, MouseSteeringAxisY_Mult := MSAY_Parsed.Mult
 
 IniRead, MouseSteerWidth, %configFile%, Settings, MouseSteerWidth, 1.0
+IniRead, MouseSteerDeadzone, %configFile%, Settings, MouseSteerDeadzone, 0
 IniRead, LX_D_MovesMouse, %configFile%, Settings, LX_D_MovesMouse, 0
 IniRead, AnalogSupersedesMouse, %configFile%, Settings, AnalogSupersedesMouse, 0
 
@@ -359,8 +362,10 @@ MathVars.WD_Mult := (WootingDeadzone >= 255 || WootingDeadzone <= 0) ? 0 : (255.
 MathVars.ExtS_Mult := (ExtStickDeadzone >= 255 || ExtStickDeadzone <= 0) ? 0 : (255.0 / (255 - ExtStickDeadzone))
 MathVars.ExtT_Mult := (ExtTriggerDeadzone >= 255 || ExtTriggerDeadzone <= 0) ? 0 : (255.0 / (255 - ExtTriggerDeadzone))
 MathVars.MaxDist := (A_ScreenHeight / 2) * MouseSteerWidth
-MathVars.MousePressureMult := MathVars.MaxDist > 0 ? (255.0 / MathVars.MaxDist) : 0
-MathVars.MaxDist_Div255 := MathVars.MaxDist / 255.0 
+MathVars.MS_DeadzonePixels := MathVars.MaxDist * (MouseSteerDeadzone / 100.0)
+safeDist := MathVars.MaxDist - MathVars.MS_DeadzonePixels
+MathVars.MousePressureMult := safeDist > 0 ? (255.0 / safeDist) : 0
+MathVars.MaxDist_Div255 := MathVars.MaxDist / 255.0
 
 For _, ax in ["LX", "LY", "RX", "RY", "LT", "RT"] {
     IniRead, adzRaw, %configFile%, Settings, %ax%_Antideadzone, 0
@@ -487,7 +492,7 @@ ManageAHISubscriptions() {
 UpdateAHIMousePhysics() {
     global AHIMouse, AHIMouseAxisX_Mult, AHIMouseAxisY_Mult, AHIMouseSensitivity, AHIMouseDecay, CLTimer
     
-    ; 1. Prevent Dropped Inputs (Race Condition Fix)
+    ; Prevent Dropped Inputs (Race Condition Fix)
     Critical, On
     rawDeltaX := AHIMouse.DeltaX
     rawDeltaY := AHIMouse.DeltaY
@@ -495,7 +500,7 @@ UpdateAHIMousePhysics() {
     AHIMouse.DeltaY := 0
     Critical, Off
 
-    ; 2. Calculate Time Delta (Frame-Rate Independence)
+    ; Calculate Time Delta (Frame-Rate Independence)
     currentTick := A_TickCount
     dt := currentTick - AHIMouse.LastTick
     AHIMouse.LastTick := currentTick
@@ -507,15 +512,15 @@ UpdateAHIMousePhysics() {
     velX := rawDeltaX * normFactor * AHIMouseAxisX_Mult
     velY := (rawDeltaY * -1) * normFactor * AHIMouseAxisY_Mult
 
-    ; 3. Velocity-Targeting (Multiplied by 3.0 to keep existing config values similar)
+    ; Velocity-Targeting
     targetX := velX * AHIMouseSensitivity * 3.0
     targetY := velY * AHIMouseSensitivity * 3.0
 
-    ; 4. Apply Decay (Weight/Return Speed)
+    ; Apply Decay (Weight/Return Speed)
     AHIMouse.StickX := (rawDeltaX != 0) ? targetX : AHIMouse.StickX * AHIMouseDecay
     AHIMouse.StickY := (rawDeltaY != 0) ? targetY : AHIMouse.StickY * AHIMouseDecay
 
-    ; 5. Clamp to XInput limits
+    ; Clamp to XInput limits
     AHIMouse.StickX := Max(-255, Min(255, AHIMouse.StickX))
     AHIMouse.StickY := Max(-255, Min(255, AHIMouse.StickY))
     
@@ -531,20 +536,44 @@ UpdateAllVirtualAxes() {
     rx := CalcVirtualPressure("RX", true, RX_D, RX_A), ry := CalcVirtualPressure("RY", true, RY_D, RY_A)
     lt := CalcVirtualPressure("LT", false, LT_D, LT_A), rt := CalcVirtualPressure("RT", false, RT_D, RT_A)
     
-    NormalizeStick(lx, ly)
-    NormalizeStick(rx, ry)
+    ; Apply radial deadzone, linearity, and circular clamping BEFORE committing
+    ApplyRadialStick(lx, ly, "LX")
+    ApplyRadialStick(rx, ry, "RX")
     
     CommitVirtualPressure("LX", true, lx), CommitVirtualPressure("LY", true, ly)
     CommitVirtualPressure("RX", true, rx), CommitVirtualPressure("RY", true, ry)
     CommitVirtualPressure("LT", false, lt), CommitVirtualPressure("RT", false, rt)
 }
 
-NormalizeStick(ByRef x, ByRef y) {
+ApplyRadialStick(ByRef x, ByRef y, axisX) {
+    global ADZ_Calc, Linearity_Calc
+    
     mag := Sqrt((x ** 2) + (y ** 2))
-    if (mag > 255) {
-        x := (x / mag) * 255.0
-        y := (y / mag) * 255.0
-    }
+    if (mag == 0)
+        return
+    
+    ; Normalize to 0.0 - 1.0 (assuming 255 is a fully held stick)
+    normMag := mag / 255.0
+    if (normMag > 1.0)
+        normMag := 1.0
+    
+    ; Read the curve values using the X axis (assuming symmetric XY settings)
+    lin := Linearity_Calc[axisX]
+    adz_raw := ADZ_Calc[axisX].Raw
+    adz_scale := ADZ_Calc[axisX].Scale
+    
+    ; Apply Linearity radially
+    if (lin != 1.0)
+        normMag := normMag ** lin
+    
+    ; Apply Anti-Deadzone radially
+    if (adz_raw > 0)
+        normMag := (adz_raw / 255.0) + (normMag * adz_scale)
+    
+    ; Scale the X and Y components back proportionally
+    newMag := normMag * 255.0
+    x := Round((x / mag) * newMag)
+    y := Round((y / mag) * newMag)
 }
 
 CalcVirtualPressure(axis, isStick, ByRef dArray, ByRef aArray) {
@@ -602,12 +631,24 @@ CalcVirtualPressure(axis, isStick, ByRef dArray, ByRef aArray) {
         
         if (isStick && MouseState.SteeringActive) {
             if (axis == MouseSteeringAxisX && (!AnalogSupersedesMouse || pressure == 0)) {
-                mousePressure := (MouseState.X - ScreenCenter.x) * MathVars.MousePressureMult * MouseSteeringAxisX_Mult
-                pressure := AnalogSupersedesMouse ? mousePressure : (pressure + mousePressure)
+                distX := MouseState.X - ScreenCenter.x
+                absDistX := Abs(distX)
+                
+                if (absDistX > MathVars.MS_DeadzonePixels) {
+                    signX := (distX < 0) ? -1 : 1
+                    mousePressure := (absDistX - MathVars.MS_DeadzonePixels) * MathVars.MousePressureMult * MouseSteeringAxisX_Mult * signX
+                    pressure := AnalogSupersedesMouse ? mousePressure : (pressure + mousePressure)
+                }
             }
             else if (axis == MouseSteeringAxisY && (!AnalogSupersedesMouse || pressure == 0)) {
-                mousePressure := (ScreenCenter.y - MouseState.Y) * MathVars.MousePressureMult * MouseSteeringAxisY_Mult
-                pressure := AnalogSupersedesMouse ? mousePressure : (pressure + mousePressure)
+                distY := ScreenCenter.y - MouseState.Y
+                absDistY := Abs(distY)
+                
+                if (absDistY > MathVars.MS_DeadzonePixels) {
+                    signY := (distY < 0) ? -1 : 1
+                    mousePressure := (absDistY - MathVars.MS_DeadzonePixels) * MathVars.MousePressureMult * MouseSteeringAxisY_Mult * signY
+                    pressure := AnalogSupersedesMouse ? mousePressure : (pressure + mousePressure)
+                }
             }
         }
     }
@@ -618,22 +659,23 @@ CalcVirtualPressure(axis, isStick, ByRef dArray, ByRef aArray) {
 CommitVirtualPressure(axis, isStick, pressure) {
     global lastAxisState, CONST, ADZ_Calc, Linearity_Calc, pad
     
+    ; Sticks are already scaled and clamped by ApplyRadialStick. Clamping triggers here.
     pressure := isStick ? Max(-255, Min(255, pressure)) : Max(0, Min(255, pressure))
     
-    if (Linearity_Calc[axis] != 1.0 && pressure != 0) {
-        pSign := (pressure < 0) ? -1 : 1
-        pNorm := Abs(pressure) / 255.0
-        pressure := (pNorm ** Linearity_Calc[axis]) * 255.0 * pSign
-    }
-    
-    if (ADZ_Calc[axis].Raw > 0 && pressure != 0) {
-        calc_raw := ADZ_Calc[axis].Raw
-        calc_scale := ADZ_Calc[axis].Scale
+    ; Only apply independent curves to Triggers (LT/RT)
+    if (!isStick) {
+        if (Linearity_Calc[axis] != 1.0 && pressure != 0) {
+            pSign := (pressure < 0) ? -1 : 1
+            pNorm := Abs(pressure) / 255.0
+            pressure := (pNorm ** Linearity_Calc[axis]) * 255.0 * pSign
+        }
         
-        if (isStick)
-            pressure := (pressure > 0) ? calc_raw + (pressure * calc_scale) : -calc_raw + (pressure * calc_scale)
-        else if (pressure > 0)
-            pressure := calc_raw + (pressure * calc_scale)
+        if (ADZ_Calc[axis].Raw > 0 && pressure != 0) {
+            calc_raw := ADZ_Calc[axis].Raw
+            calc_scale := ADZ_Calc[axis].Scale
+            if (pressure > 0)
+                pressure := calc_raw + (pressure * calc_scale)
+        }
     }
     
     finalVal := isStick ? Round(pressure * (pressure < 0 ? CONST.MULT_NEG : CONST.MULT_POS)) : Round(pressure)
@@ -778,102 +820,6 @@ ReadExternalGamepads() {
 ReadIni(file, key, section := "AnalogBinds") {
     IniRead, out, %file%, %section%, %key%, ERROR
     return out
-}
-
-UpdateVirtualAxis(axis, isStick, ByRef dArray, ByRef aArray) {
-    global lastAxisState, ScreenCenter, MouseState, CONST
-    global MathVars, ADZ_Calc, Linearity_Calc, LX_D_MovesMouse, WootingDeadzone, ExtStickDeadzone, ExtTriggerDeadzone
-    global AnalogSupersedesMouse, ExtPadState, WootingEnabled
-    global MouseSteeringAxisX, MouseSteeringAxisY
-    global MouseSteeringAxisX_Mult, MouseSteeringAxisY_Mult
-    
-    pressure := 0, hasDigital := false
-    
-    for _, pair in dArray {
-        if GetKeyState(pair[1], "P") {
-            pressure := pair[2]
-            if (isStick && axis == MouseSteeringAxisX && LX_D_MovesMouse) {
-                signX := MouseSteeringAxisX_Mult < 0 ? -1 : 1
-                targetX := Round(ScreenCenter.x + (pressure * MathVars.MaxDist_Div255 * signX))
-                MouseMove, %targetX%, % MouseState.Y, 0
-            }
-            hasDigital := true
-            break
-        }
-    }
-    
-    if (!hasDigital) {
-        for key, value in aArray {
-            rawVal := 0
-            if (WootingEnabled)
-                rawVal := sw.RP(key)
-            if (WootingDeadzone > 0)
-                rawVal := (rawVal <= WootingDeadzone) ? 0 : (rawVal - WootingDeadzone) * MathVars.WD_Mult
-            pressure += rawVal * value
-        }
-        
-        extVal := 0
-        rawExt := ExtPadState[axis]
-        
-        if (isStick) {
-            absExt := Abs(rawExt)
-            if (ExtStickDeadzone > 0)
-                absExt := (absExt <= ExtStickDeadzone) ? 0 : (absExt - ExtStickDeadzone) * MathVars.ExtS_Mult
-            extVal := (rawExt < 0) ? -absExt : absExt
-        } else {
-            if (ExtTriggerDeadzone > 0)
-                extVal := (rawExt <= ExtTriggerDeadzone) ? 0 : (rawExt - ExtTriggerDeadzone) * MathVars.ExtT_Mult
-            else
-                extVal := rawExt
-        }
-        pressure += extVal
-        
-        ; --- APPLY SMOOTHED MOUSE ---
-        global AHIMouse, AHITranslateMouseToAxes, AHIMouseAxisX, AHIMouseAxisY
-        if (AHITranslateMouseToAxes && isStick) {
-            if (axis == AHIMouseAxisX)
-                pressure += AHIMouse.StickX
-            else if (axis == AHIMouseAxisY)
-                pressure += AHIMouse.StickY
-        }
-        
-        if (isStick && MouseState.SteeringActive) {
-            if (axis == MouseSteeringAxisX && (!AnalogSupersedesMouse || pressure == 0)) {
-                mousePressure := (MouseState.X - ScreenCenter.x) * MathVars.MousePressureMult * MouseSteeringAxisX_Mult
-                pressure := AnalogSupersedesMouse ? mousePressure : (pressure + mousePressure)
-            }
-            else if (axis == MouseSteeringAxisY && (!AnalogSupersedesMouse || pressure == 0)) {
-                mousePressure := (ScreenCenter.y - MouseState.Y) * MathVars.MousePressureMult * MouseSteeringAxisY_Mult
-                pressure := AnalogSupersedesMouse ? mousePressure : (pressure + mousePressure)
-            }
-        }
-    }
-    
-    pressure := isStick ? Max(-255, Min(255, pressure)) : Max(0, Min(255, pressure))
-    
-    ; --- APPLY LINEARITY CURVE ---
-    if (Linearity_Calc[axis] != 1.0 && pressure != 0) {
-        pSign := (pressure < 0) ? -1 : 1
-        pNorm := Abs(pressure) / 255.0
-        pressure := (pNorm ** Linearity_Calc[axis]) * 255.0 * pSign
-    }
-    
-    if (ADZ_Calc[axis].Raw > 0 && pressure != 0) {
-        calc_raw := ADZ_Calc[axis].Raw
-        calc_scale := ADZ_Calc[axis].Scale
-        
-        if (isStick)
-            pressure := (pressure > 0) ? calc_raw + (pressure * calc_scale) : -calc_raw + (pressure * calc_scale)
-        else if (pressure > 0)
-            pressure := calc_raw + (pressure * calc_scale)
-    }
-    
-    finalVal := isStick ? Round(pressure * (pressure < 0 ? CONST.MULT_NEG : CONST.MULT_POS)) : Round(pressure)
-    
-    if (finalVal != lastAxisState[axis]) {
-        lastAxisState[axis] := finalVal
-        pad.Axes[axis].SetState(finalVal)
-    }
 }
 
 FocusLost() {
