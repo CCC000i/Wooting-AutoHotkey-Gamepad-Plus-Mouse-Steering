@@ -5,6 +5,7 @@
 #NoEnv
 #SingleInstance Force
 SetBatchLines, -1
+#InputLevel 20
 
 Global DebugMode := true
 Global ScriptStartTime := A_TickCount
@@ -95,10 +96,10 @@ if (ErrorLevel) {
     ExitApp
 }
 
-RegExMatch(FileContent, "s)\[CustomAutoexecute\]\R*(.*?)(?=\[|$)", MatchAuto)
+RegExMatch(FileContent, "ms)\[CustomAutoexecute\]\R*(.*?)(?=^\[|\z)", MatchAuto)
 CustomAutoexecute := MatchAuto1
 
-RegExMatch(FileContent, "s)\[CustomSubroutine\]\R*(.*?)(?=\[|$)", MatchSub)
+RegExMatch(FileContent, "ms)\[CustomSubroutine\]\R*(.*?)(?=^\[|\z)", MatchSub)
 CustomSubroutine := MatchSub1
 
 ; === Dynamic Script Compilation ===
