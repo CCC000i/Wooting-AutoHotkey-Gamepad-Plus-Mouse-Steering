@@ -102,6 +102,23 @@ CustomAutoexecute := MatchAuto1
 RegExMatch(FileContent, "ms)\[CustomSubroutine\]\R*(.*?)(?=^\[|\z)", MatchSub)
 CustomSubroutine := MatchSub1
 
+; --- AHI Shorthand Expansion ---
+; 1. Handle Wheel / HWheel assignments
+CustomSubroutine := RegExReplace(CustomSubroutine, "mi)^ahiS_(H?Wheel)::(\w+),(\w+)(?:,(\d+))?\s*$", "ahiS_$1(direction) {`n    if (direction == 1) {`n        <WHEEL:$2:$4>`n    } else if (direction == -1) {`n        <WHEEL:$3:$4>`n    }`n}")
+; 1a. Clear out 'Return' placeholders
+CustomSubroutine := RegExReplace(CustomSubroutine, "i)[ \t]*<WHEEL:return:[^>]*>", "")
+; 1b. Expand placeholders with DEFAULT duration (25) if duration was left blank
+CustomSubroutine := RegExReplace(CustomSubroutine, "i)<WHEEL:(\w+):>", "Send, {$1 down}`n        Sleep, 25`n        Send, {$1 up}")
+; 1c. Expand remaining placeholders with the specified duration
+CustomSubroutine := RegExReplace(CustomSubroutine, "i)<WHEEL:(\w+):(\d+)>", "Send, {$1 down}`n        Sleep, $2`n        Send, {$1 up}")
+; 2. Handle Custom Shorthands
+CustomSubroutine := RegExReplace(CustomSubroutine, "mi)^ahiS_(\w+)::MouseSteering\s*$", "ahiS_$1(state) {`n    if state {`n        ActivateMouseSteering()`n    }`n    else {`n        DeactivateMouseSteering()`n    }`n}")
+; Add future custom shorthands here using the same format before Pass 3...
+; 3. Handle blank or 'Return' assignments (creates empty function)
+CustomSubroutine := RegExReplace(CustomSubroutine, "mi)^ahiS_(\w+)::(?:return)?\s*$", "ahiS_$1(state) {`n}")
+; 4. Handle standard key assignments
+CustomSubroutine := RegExReplace(CustomSubroutine, "m)^ahiS_(\w+)::(\S+)\s*$", "ahiS_$1(state) {`n    if state {`n        Send, {$2 down}`n    }`n    else {`n        Send, {$2 up}`n    }`n}")
+
 ; === Dynamic Script Compilation ===
 IniRead, EnableAHI, %settingsFile%, GlobalSettings, EnableAHI, 1
 IniRead, WootingEnabled, %settingsFile%, GlobalSettings, WootingEnabled, 1
